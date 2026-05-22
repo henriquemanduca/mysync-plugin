@@ -12,3 +12,9 @@
 	font-weight: var(--font-semibold);
 	color: var(--text-normal);
 }
+
+.mysync-readonly-setting {
+	color: var(--text-muted);
+	background-color: var(--background-secondary);
+	cursor: text;
+}

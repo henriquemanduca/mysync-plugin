@@ -1,6 +1,7 @@
 import { App, TFile, TFolder } from "obsidian";
 import type { VaultFileRecord, VaultFileType } from "sync/types";
 
+const VAULT_FILE_PREFIX = "vault-file";
 const FILE_ATTACHMENT_ID = "file";
 const IMAGE_MIME_TYPES: Record<string, string> = {
 	avif: "image/avif",
@@ -93,13 +94,17 @@ export function collectFilesInFolder(folder: TFolder) {
 }
 
 export function isFileInsideSyncFolder(file: TFile, syncFolder: string) {
+	return isPathInsideSyncFolder(file.path, syncFolder);
+}
+
+export function isPathInsideSyncFolder(path: string, syncFolder: string) {
 	const normalizedFolder = normalizeVaultFolder(syncFolder);
 
 	if (normalizedFolder === "/") {
 		return true;
 	}
 
-	return file.path === normalizedFolder || file.path.startsWith(`${normalizedFolder}/`);
+	return path === normalizedFolder || path.startsWith(`${normalizedFolder}/`);
 }
 
 export async function createFileRecord(app: App, file: TFile): Promise<VaultFileRecord> {
@@ -124,6 +129,7 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 
 	if (fileType === "markdown") {
 		record.content = await app.vault.cachedRead(file);
+
 	} else if (mimeType) {
 		const data = await app.vault.readBinary(file);
 		record._attachments = {
@@ -138,7 +144,17 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 }
 
 export function createFileRecordId(path: string) {
-	return `vault-file:${path}`;
+	return `${VAULT_FILE_PREFIX}:${path}`;
+}
+
+export function getPathFromFileRecordId(id: string) {
+	const prefix = `${VAULT_FILE_PREFIX}:`;
+
+	if (!id.startsWith(prefix)) {
+		return null;
+	}
+
+	return id.slice(prefix.length);
 }
 
 function normalizeVaultFolder(folder: string) {

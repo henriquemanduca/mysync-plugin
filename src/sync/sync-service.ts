@@ -5,9 +5,12 @@ import type { VaultFileRecord } from "sync/types";
 import {
 	collectFilesInFolder,
 	createFileRecord,
+	createFileRecordId,
+	getPathFromFileRecordId,
 	getSyncFolder,
 	getSyncFolderState,
-	isFileInsideSyncFolder
+	isFileInsideSyncFolder,
+	isPathInsideSyncFolder
 } from "sync/vault-files";
 import { Logger } from "utils/logger";
 
@@ -24,6 +27,13 @@ interface RestoreResult {
 	conflicts: number;
 }
 
+interface RemoteDeletionResult {
+	total: number;
+	deleted: number;
+	skipped: number;
+	conflicts: number;
+}
+
 export type SyncStatus =
 	| { state: "idle" }
 	| { state: "queued"; pending: number }
@@ -32,8 +42,9 @@ export type SyncStatus =
 	| { state: "pushing"; docsWritten: number }
 	| { state: "pushed"; docsWritten: number }
 	| { state: "pulling"; docsRead: number }
+	| { state: "deleting"; current: number; total: number; deleted: number; skipped: number; conflicts: number }
 	| { state: "restoring"; current: number; total: number; restored: number; skipped: number; conflicts: number }
-	| { state: "pulled"; docsRead: number; restored: number; skipped: number; conflicts: number }
+	| { state: "pulled"; docsRead: number; restored: number; deleted: number; skipped: number; conflicts: number }
 	| { state: "testing" }
 	| { state: "tested"; databaseName: string; documentCount?: number }
 	| { state: "error"; message: string };
@@ -44,6 +55,7 @@ export class SyncService {
 	private syncInProgress = false;
 	private pendingSyncPaths = new Set<string>();
 	private syncQueueTimer: number | null = null;
+	private applyingRemoteDeletion = false;
 
 	constructor(
 		private app: App,
@@ -54,15 +66,15 @@ export class SyncService {
 		this.onStatusChange({ state: "idle" });
 	}
 
+	isRunning(): boolean {
+		if (this.syncInProgress) new Notice("MySync is already running.");
+		return this.syncInProgress;
+	}
+
 	async syncNow() {
-		logger.method("syncNow", { syncInProgress: this.syncInProgress });
+		if (this.isRunning()) return;
 
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
-		new Notice("MySync synchronization...");
-
+		new Notice("Starting.");
 		this.syncInProgress = true;
 		let failed = false;
 
@@ -74,7 +86,8 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
-			new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
+			// new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
+			new Notice(`Saved ${result.saved} vault files to PouchDB.`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -96,11 +109,7 @@ export class SyncService {
 	async pushToCouchDb() {
 		logger.method("pushToCouchDb", { syncInProgress: this.syncInProgress });
 
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
-		new Notice("MySync start pushing...");
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings);
@@ -117,6 +126,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
+		const notice = new Notice("MySync start pushing.", 0);
 		try {
 			const result = await this.syncLocalFiles();
 
@@ -161,6 +171,8 @@ export class SyncService {
 			});
 			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details."));
 		} finally {
+			notice.hide()
+
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
 
@@ -171,12 +183,7 @@ export class SyncService {
 	}
 
 	async pullFromCouchDb() {
-		// logger.method("pullFromCouchDb", { syncInProgress: this.syncInProgress });
-
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings, "pulling");
@@ -192,11 +199,16 @@ export class SyncService {
 
 		this.syncInProgress = true;
 
+		const notice = new Notice("MySync start pulling", 0);
 		try {
 			this.onStatusChange({
 				state: "pulling",
 				docsRead: 0
 			});
+
+			const localRecordsBeforePull = await this.store.listFileRecords();
+			const localRecordsById = new Map(localRecordsBeforePull.map((record) => [record._id, record]));
+			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
 
 			const pullResult = await this.store.pullFromCouchDb(
 				{
@@ -213,18 +225,26 @@ export class SyncService {
 				}
 			);
 
-			const records = await this.store.listFileRecords();
-			const restoreResult = await this.restoreVaultFiles(records);
+			const deletionCandidateIds = Array.from(new Set([
+				...localRecordsById.keys(),
+				...localVaultRecordIds
+			]));
+			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
+			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
+			const restoreResult = await this.restoreVaultFiles();
+			const skipped = restoreResult.skipped + deletionResult.skipped;
+			const conflicts = restoreResult.conflicts + deletionResult.conflicts;
 
 			this.onStatusChange({
 				state: "pulled",
 				docsRead: pullResult.docsRead,
 				restored: restoreResult.restored,
-				skipped: restoreResult.skipped,
-				conflicts: restoreResult.conflicts
+				deleted: deletionResult.deleted,
+				skipped,
+				conflicts
 			});
 			new Notice(
-				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, skipped ${restoreResult.skipped}, conflicts ${restoreResult.conflicts}.`
+				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
 			);
 		} catch (error) {
 			logger.error("CouchDB pull failed", error);
@@ -234,18 +254,115 @@ export class SyncService {
 			});
 			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details."));
 		} finally {
+			notice.hide();
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
 		}
 	}
 
-	async testCouchDbConnection() {
-		// logger.method("testCouchDbConnection", { syncInProgress: this.syncInProgress });
+	private async deleteRemoteDeletedFiles(
+		deletedRecordIds: string[],
+		localRecordsById: Map<string, VaultFileRecord>
+	): Promise<RemoteDeletionResult> {
+		let deleted = 0;
+		let skipped = 0;
+		let conflicts = 0;
+		const uniqueDeletedRecordIds = Array.from(new Set(deletedRecordIds));
 
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
+		this.applyingRemoteDeletion = true;
+
+		try {
+			for (const [index, recordId] of uniqueDeletedRecordIds.entries()) {
+				const deleteStatus = await this.deleteRemoteDeletedFile(recordId, localRecordsById);
+
+				if (deleteStatus === "deleted") {
+					deleted += 1;
+				} else if (deleteStatus === "conflict") {
+					conflicts += 1;
+				} else {
+					skipped += 1;
+				}
+
+				this.onStatusChange({
+					state: "deleting",
+					current: index + 1,
+					total: uniqueDeletedRecordIds.length,
+					deleted,
+					skipped,
+					conflicts
+				});
+			}
+		} finally {
+			this.applyingRemoteDeletion = false;
 		}
+
+		return {
+			total: uniqueDeletedRecordIds.length,
+			deleted,
+			skipped,
+			conflicts
+		};
+	}
+
+	private async deleteRemoteDeletedFile(
+		recordId: string,
+		localRecordsById: Map<string, VaultFileRecord>
+	): Promise<"deleted" | "skipped" | "conflict"> {
+		const rawPath = getPathFromFileRecordId(recordId);
+
+		if (!rawPath) {
+			return "skipped";
+		}
+
+		const path = normalizeRestoredPath(rawPath);
+		const syncFolder = this.getCurrentSyncFolder();
+
+		if (!path || !isPathInsideSyncFolder(path, syncFolder)) {
+			return "skipped";
+		}
+
+		const existingFile = this.app.vault.getAbstractFileByPath(path);
+		const localRecord = localRecordsById.get(recordId);
+
+		if (!existingFile) {
+			return "skipped";
+		}
+
+		if (!(existingFile instanceof TFile)) {
+			return "conflict";
+		}
+
+		if (localRecord && !(await this.localFileMatchesRecord(existingFile, localRecord))) {
+			return "conflict";
+		}
+
+		await this.app.vault.delete(existingFile);
+		return "deleted";
+	}
+
+	private async localFileMatchesRecord(file: TFile, record: VaultFileRecord) {
+		if (record.fileType === "markdown" && typeof record.content === "string") {
+			const localContent = await this.app.vault.read(file);
+			return localContent === record.content;
+		}
+
+		const recordData = await getAttachmentArrayBuffer(record);
+
+		if (recordData) {
+			const localData = await this.app.vault.readBinary(file);
+			const [recordHash, localHash] = await Promise.all([
+				bufferHash(recordData),
+				bufferHash(localData)
+			]);
+
+			return recordHash === localHash;
+		}
+
+		return file.stat.size === record.size && file.stat.mtime === record.lastChanged;
+	}
+
+	async testCouchDbConnection() {
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings, "testing");
@@ -260,7 +377,6 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-
 		let failed = false;
 
 		try {
@@ -278,7 +394,7 @@ export class SyncService {
 				databaseName: result.databaseName,
 				documentCount: result.documentCount
 			});
-			new Notice(`Connected to CouchDB database ${result.databaseName}.`);
+			new Notice("Connected to CouchDB database.");
 		} catch (error) {
 			failed = true;
 			logger.error("CouchDB connection test failed", error);
@@ -297,8 +413,6 @@ export class SyncService {
 	}
 
 	private async syncLocalFiles(): Promise<LocalSyncResult> {
-		// logger.method("syncLocalFiles");
-
 		const syncFolder = this.getCurrentSyncFolder();
 
 		if (!syncFolder) {
@@ -340,12 +454,12 @@ export class SyncService {
 		};
 	}
 
-	private async restoreVaultFiles(records: VaultFileRecord[]): Promise<RestoreResult> {
-		// logger.method("restoreVaultFiles", { total: records.length });
-
+	private async restoreVaultFiles(): Promise<RestoreResult> {
 		let restored = 0;
 		let skipped = 0;
 		let conflicts = 0;
+
+		const records = await this.store.listFileRecords();
 
 		for (const [index, record] of records.entries()) {
 			let restoreStatus: "restored" | "skipped" | "conflict";
@@ -384,42 +498,43 @@ export class SyncService {
 	}
 
 	private async restoreVaultFile(record: VaultFileRecord): Promise<"restored" | "skipped" | "conflict"> {
-		// logger.method("restoreVaultFile", { path: record.path, fileType: record.fileType });
-
 		const path = normalizeRestoredPath(record.path);
-
 		if (!path || record.type !== "vault-file") {
 			return "skipped";
 		}
 
 		const existingFile = this.app.vault.getAbstractFileByPath(path);
-
-		if (existingFile) {
-			await this.createConflictFile(record, path);
-			return "conflict";
-		}
-
-		const folderStatus = await this.ensureParentFolders(path);
-
-		if (folderStatus === "conflict") {
-			await this.createConflictFile(record, path);
-			return "conflict";
-		}
-
-		if (record.fileType === "markdown") {
-			if (typeof record.content !== "string") {
+		if (existingFile instanceof TFile) {
+			if (record.lastChanged <= existingFile.stat.mtime) {
 				return "skipped";
 			}
 
-			await this.app.vault.create(path, record.content);
+			await this.overwriteLocalFile(record, path);
 			return "restored";
 		}
 
-		if (record.fileType === "image" || record.fileType === "binary") {
-			const data = await getAttachmentArrayBuffer(record);
+		const folderStatus = await this.ensureParentFolders(path);
+		if (folderStatus === "conflict") {
+			return "skipped";
+		}
 
-			if (!data) {
-				return "skipped";
+		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
+		if (fileTypeIstext) {
+			await this.app.vault.create(path, record.content!);
+			return "restored";
+		}
+
+		if (!fileTypeIstext) {
+			const data = await getAttachmentArrayBuffer(record);
+			if (!data) return "skipped";
+
+			if (existingFile instanceof TFile) {
+				const localData = await this.app.vault.readBinary(existingFile);
+				const [remoteHash, localHash] = await Promise.all([
+					bufferHash(data),
+					bufferHash(localData)
+				]);
+				if (remoteHash === localHash) return "skipped";
 			}
 
 			await this.app.vault.createBinary(path, data);
@@ -429,32 +544,24 @@ export class SyncService {
 		return "skipped";
 	}
 
-	private async createConflictFile(record: VaultFileRecord, originalPath: string) {
-		const conflictPath = getConflictPath(originalPath);
+	private async overwriteLocalFile(record: VaultFileRecord, path: string): Promise<void> {
+		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
 
-		const folderStatus = await this.ensureParentFolders(conflictPath);
-		if (folderStatus === "conflict") {
-			return;
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		if (existing instanceof TFile || existing instanceof TFolder) {
+			await this.app.vault.delete(existing);
 		}
 
-		const existingConflict = this.app.vault.getAbstractFileByPath(conflictPath);
-		if (existingConflict) {
-			await this.app.vault.delete(existingConflict);
-		}
+		if (fileTypeIstext) {
+			await this.app.vault.create(path, record.content!);
 
-		if (record.fileType === "markdown" && typeof record.content === "string") {
-			await this.app.vault.create(conflictPath, record.content);
-		} else if (record.fileType === "image" || record.fileType === "binary") {
+		} else if (!fileTypeIstext && typeof record._attachments?.file?.data !== "undefined") {
 			const data = await getAttachmentArrayBuffer(record);
-			if (data) {
-				await this.app.vault.createBinary(conflictPath, data);
-			}
+			if (data) await this.app.vault.createBinary(path, data);
 		}
 	}
 
 	private async ensureParentFolders(path: string): Promise<"ok" | "conflict"> {
-		// logger.method("ensureParentFolders", { path });
-
 		const parts = path.split("/");
 		parts.pop();
 
@@ -500,23 +607,21 @@ export class SyncService {
 	}
 
 	async handleRenamedFile(abstractFile: TAbstractFile, oldPath: string) {
-		// logger.method("handleRenamedFile", { path: abstractFile.path, oldPath });
-
 		await this.store.deleteFileRecordByPath(oldPath);
 		this.queueFileSync(abstractFile);
 	}
 
 	async handleDeletedFile(abstractFile: TAbstractFile) {
-		// logger.method("handleDeletedFile", { path: abstractFile.path });
+		if (this.applyingRemoteDeletion) {
+			return;
+		}
 
-		if (abstractFile instanceof TFile) {
+		if (abstractFile instanceof TFile && this.isFileInsideCurrentSyncFolder(abstractFile)) {
 			await this.store.deleteFileRecordByPath(abstractFile.path);
 		}
 	}
 
 	close() {
-		// logger.method("close");
-
 		if (this.syncQueueTimer !== null) {
 			window.clearTimeout(this.syncQueueTimer);
 		}
@@ -552,7 +657,6 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-
 		let failed = false;
 
 		try {
@@ -608,11 +712,6 @@ export class SyncService {
 	}
 
 	private refreshQueuedStatus() {
-		// logger.method("refreshQueuedStatus", {
-		// 	pending: this.pendingSyncPaths.size,
-		// 	syncInProgress: this.syncInProgress
-		// });
-
 		if (this.syncInProgress) {
 			return;
 		}
@@ -626,21 +725,26 @@ export class SyncService {
 	}
 
 	private isFileInsideCurrentSyncFolder(file: TFile) {
-		// logger.method("isFileInsideCurrentSyncFolder", { path: file.path });
-
 		return isFileInsideSyncFolder(file, this.getCurrentSyncFolder());
 	}
 
-	private getCurrentSyncFolder() {
-		// logger.method("getCurrentSyncFolder");
+	private listCurrentVaultFileRecordIds() {
+		const syncFolder = this.getCurrentSyncFolder();
+		const syncFolderState = getSyncFolderState(this.app, syncFolder);
 
+		if (!syncFolderState.valid) {
+			throw new Error(syncFolderState.message);
+		}
+
+		return collectFilesInFolder(syncFolderState.folder).map((file) => createFileRecordId(file.path));
+	}
+
+	private getCurrentSyncFolder() {
 		const settings = this.getSettings();
 		return getSyncFolder(this.app, settings.syncFolderMode, settings.customSyncFolder);
 	}
 
 	private async syncFileIfChanged(file: TFile) {
-		// logger.method("syncFileIfChanged", { path: file.path });
-
 		if (!(await this.store.hasFileChanged(file))) {
 			return false;
 		}
@@ -684,16 +788,6 @@ function getErrorMessage(error: unknown, fallback: string) {
 	return fallback;
 }
 
-function getConflictPath(path: string) {
-	const lastDotIndex = path.lastIndexOf(".");
-
-	if (lastDotIndex > 0) {
-		return path.slice(0, lastDotIndex) + ".conflict" + path.slice(lastDotIndex);
-	}
-
-	return path + ".conflict";
-}
-
 function normalizeRestoredPath(path: string) {
 	if (path.startsWith("/")) {
 		return null;
@@ -723,4 +817,12 @@ async function getAttachmentArrayBuffer(record: VaultFileRecord) {
 	}
 
 	return null;
+}
+
+async function bufferHash(buffer: ArrayBuffer): Promise<string> {
+	const digest = await crypto.subtle.digest('MD5', buffer);
+	// Cast ArrayBuffer → Uint8Array → hex string
+	return Array.from(new Uint8Array(digest))
+		.map(b => b.toString(16).padStart(2, '0'))
+		.join('');
 }

@@ -18,13 +18,14 @@ export default class MySyncPlugin extends Plugin {
 		this.statusBarEl = this.addStatusBarItem();
 		this.updateSyncStatus({ state: "idle" });
 
-		const fileStore = new PouchDbFileStore();
+		const fileStore = new PouchDbFileStore(createLocalDatabaseName(this.settings.localVaultId));
 		this.syncService = new SyncService(this.app, fileStore, () => this.settings, (status) =>
 			this.updateSyncStatus(status)
 		);
 
-		this.addRibbonIcon("refresh-cw", "Sync with MySync", () => {
-			void this.syncService.syncNow();
+		this.addRibbonIcon("refresh-cw", "Sync local to remote", async () => {
+			await this.syncService.syncNow();
+			await this.syncService.pushToCouchDb();
 		});
 
 		this.addCommand({
@@ -99,6 +100,11 @@ export default class MySyncPlugin extends Plugin {
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+
+		if (!this.settings.localVaultId) {
+			this.settings.localVaultId = createLocalVaultId();
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings() {
@@ -122,64 +128,75 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "syncing") {
-			this.statusBarEl.setText(`local ${status.current}/${status.total}, skipped ${status.skipped}`);
+			this.statusBarEl.setText(`local ${status.current}/${status.total}`);
 			this.statusBarEl.title = `Syncing local files. Saved ${status.saved}, skipped ${status.skipped}`;
 			return;
 		}
 
 		if (status.state === "done") {
-			if (status.saved == 0) {
-				this.statusBarEl.setText(`done, skipped ${status.skipped}`);
-			} else {
-				this.statusBarEl.setText(`done ${status.saved}/${status.total}, skipped ${status.skipped}`);
-			}
+    		this.statusBarEl.setText("done");
 			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
 			return;
 		}
 
 		if (status.state === "pushing") {
-			this.statusBarEl.setText("push remote");
-			this.statusBarEl.title = `Pushing to CouchDB. Written ${status.docsWritten} document change(s)`;
+			this.statusBarEl.setText("pushing");
+			this.statusBarEl.title = "Pushing to remote.";
 			return;
 		}
 
 		if (status.state === "pushed") {
-			this.statusBarEl.setText(`pushed ${status.docsWritten}`);
-			this.statusBarEl.title = `CouchDB push complete. Written ${status.docsWritten} document change(s)`;
+			this.statusBarEl.setText("pushed");
+			this.statusBarEl.title = "Push complete.";
 			return;
 		}
 
 		if (status.state === "pulling") {
-			this.statusBarEl.setText("pull remote");
-			this.statusBarEl.title = `Pulling from CouchDB. Read ${status.docsRead} document change(s)`;
+			this.statusBarEl.setText("pulling");
+			this.statusBarEl.title = "Pulling from CouchDB.";
+			return;
+		}
+
+		if (status.state === "deleting") {
+			this.statusBarEl.setText(`delete ${status.current}/${status.total}`);
+			this.statusBarEl.title = `Applying remote deletions. Deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
 		if (status.state === "restoring") {
-			this.statusBarEl.setText(`restore ${status.current}/${status.total}`);
+			this.statusBarEl.setText(`restore ${status.current}, skipped ${status.skipped}`);
 			this.statusBarEl.title = `Restoring files. Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
 		if (status.state === "pulled") {
-			this.statusBarEl.setText(`pulled ${status.restored}`);
-			this.statusBarEl.title = `CouchDB pull complete. Read ${status.docsRead}, restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
+			this.statusBarEl.setText(`pulled ${status.restored}/${status.deleted}`);
+			this.statusBarEl.title = `Pull complete. Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
 		if (status.state === "testing") {
-			this.statusBarEl.setText("test");
-			this.statusBarEl.title = "Testing CouchDB connection";
+			this.statusBarEl.setText("testing");
+			this.statusBarEl.title = "Testing remote connection";
 			return;
 		}
 
 		if (status.state === "tested") {
-			this.statusBarEl.setText("connected");
-			this.statusBarEl.title = `Connected to ${status.databaseName}. Documents: ${status.documentCount ?? "unknown"}`;
+			this.statusBarEl.setText("tested");
+			this.statusBarEl.title = `Connected to ${status.databaseName}`;
 			return;
 		}
 
 		this.statusBarEl.setText("MySync error");
 		this.statusBarEl.title = status.message;
 	}
+}
+
+function createLocalVaultId() {
+	return crypto.randomUUID().split("-")[0] ||
+		`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createLocalDatabaseName(localVaultId: string) {
+	return `mysync-files-${localVaultId}`;
 }

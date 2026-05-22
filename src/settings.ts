@@ -4,6 +4,7 @@ import type MySyncPlugin from "main";
 export type SyncFolderMode = "vault-root" | "custom";
 
 export interface MySyncSettings {
+	localVaultId: string;
 	syncFolderMode: SyncFolderMode;
 	customSyncFolder: string;
 	couchDbUrl: string;
@@ -14,6 +15,7 @@ export interface MySyncSettings {
 }
 
 export const DEFAULT_SETTINGS: MySyncSettings = {
+	localVaultId: "",
 	syncFolderMode: "vault-root",
 	customSyncFolder: "",
 	couchDbUrl: "",
@@ -47,6 +49,15 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 		const localSectionEl = this.createSection("Local configuration");
 		const remoteSectionEl = this.createSection("Remote database");
+
+		new Setting(localSectionEl)
+			.setName("Local vault ID")
+			.setDesc("Automatically generated identifier for this vault.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(`mysync-files-${this.plugin.settings.localVaultId}`);
+			});
 
 		new Setting(localSectionEl)
 			.setName("Folder source")

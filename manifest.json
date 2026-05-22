@@ -3,8 +3,8 @@
 	"name": "MySync",
 	"version": "0.1.0",
 	"minAppVersion": "1.0.0",
-	"description": "Sync notes and plugin data with MySync.",
-	"author": "",
-	"authorUrl": "",
+	"description": "Sync notes to your home database with MySync.",
+	"author": "Henrique Manduca",
+	"authorUrl": "https://github.com/henriquemanduca",
 	"isDesktopOnly": false
 }

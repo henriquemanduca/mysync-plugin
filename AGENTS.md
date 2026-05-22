@@ -2,9 +2,11 @@
 
 ## Project Structure & Module Organization
 
-This is a TypeScript Obsidian plugin scaffold. Source code lives in `src/`, with the plugin entry point at `src/main.ts`. Obsidian release metadata is stored in `manifest.json` and compatibility versions in `versions.json`. Build configuration lives in `esbuild.config.mjs` and `tsconfig.json`. Styles for the plugin belong in `styles.css`.
+This is a TypeScript Obsidian plugin for syncing with MySync. Source code lives in `src/`, with the plugin entry point at `src/main.ts`, settings UI and persistence in `src/settings.ts`, local PouchDB type declarations in `src/pouchdb.d.ts`, sync orchestration and storage modules in `src/sync/`, and shared helpers in `src/utils/`.
 
-Generated files are not source: `main.js` is emitted by the build and ignored by Git. Dependencies are installed in `node_modules/` and should not be edited directly.
+Obsidian release metadata is stored in `manifest.json` and compatibility versions in `versions.json`. Build configuration lives in `esbuild.config.mjs` and `tsconfig.json`; package and release automation live in `package.json`, `package-lock.json`, and `version-bump.mjs`. Styles for the plugin belong in `styles.css`. `setup_couchdb.sh`, `.env.sample`, and the `Makefile` support local CouchDB setup and development workflows.
+
+Generated files are not source: `dist/` contains the bundled plugin artifacts (`main.js`, `manifest.json`, `styles.css`) and local runtime data. Root-level `main.js` is ignored as a legacy/generated artifact if present. Dependencies are installed in `node_modules/` and should not be edited directly.
 
 ## Build, Test, and Development Commands
 
