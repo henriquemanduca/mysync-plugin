@@ -140,19 +140,19 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "pushing") {
-			this.statusBarEl.setText("pushing...");
-			this.statusBarEl.title = "Pushing to CouchDB.";
+			this.statusBarEl.setText("pushing");
+			this.statusBarEl.title = "Pushing to remote.";
 			return;
 		}
 
 		if (status.state === "pushed") {
-			this.statusBarEl.setText("pushed complete");
-			this.statusBarEl.title = "CouchDB push complete.";
+			this.statusBarEl.setText("pushed");
+			this.statusBarEl.title = "Push complete.";
 			return;
 		}
 
 		if (status.state === "pulling") {
-			this.statusBarEl.setText("pulling...");
+			this.statusBarEl.setText("pulling");
 			this.statusBarEl.title = "Pulling from CouchDB.";
 			return;
 		}
@@ -176,8 +176,8 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "testing") {
-			this.statusBarEl.setText("testing...");
-			this.statusBarEl.title = "Testing CouchDB connection";
+			this.statusBarEl.setText("testing");
+			this.statusBarEl.title = "Testing remote connection";
 			return;
 		}
 

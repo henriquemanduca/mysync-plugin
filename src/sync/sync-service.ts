@@ -66,13 +66,15 @@ export class SyncService {
 		this.onStatusChange({ state: "idle" });
 	}
 
-	async syncNow() {
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
-		new Notice("MySync starting...");
+	isRunning(): boolean {
+		if (this.syncInProgress) new Notice("MySync is already running.");
+		return this.syncInProgress;
+	}
 
+	async syncNow() {
+		if (this.isRunning()) return;
+
+		new Notice("Starting.");
 		this.syncInProgress = true;
 		let failed = false;
 
@@ -84,7 +86,8 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
-			new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
+			// new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
+			new Notice(`Saved ${result.saved} vault files to PouchDB.`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -106,10 +109,7 @@ export class SyncService {
 	async pushToCouchDb() {
 		logger.method("pushToCouchDb", { syncInProgress: this.syncInProgress });
 
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings);
@@ -126,7 +126,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("MySync start pushing...", 0);
+		const notice = new Notice("MySync start pushing.", 0);
 		try {
 			const result = await this.syncLocalFiles();
 
@@ -183,10 +183,7 @@ export class SyncService {
 	}
 
 	async pullFromCouchDb() {
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings, "pulling");
@@ -202,7 +199,7 @@ export class SyncService {
 
 		this.syncInProgress = true;
 
-		const notice = new Notice("MySync start pulling...", 0);
+		const notice = new Notice("MySync start pulling", 0);
 		try {
 			this.onStatusChange({
 				state: "pulling",
@@ -365,10 +362,7 @@ export class SyncService {
 	}
 
 	async testCouchDbConnection() {
-		if (this.syncInProgress) {
-			new Notice("MySync is already running.");
-			return;
-		}
+		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings, "testing");
@@ -383,7 +377,6 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-
 		let failed = false;
 
 		try {
