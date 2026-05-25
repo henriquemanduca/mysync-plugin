@@ -51,10 +51,12 @@ declare module "pouchdb" {
 		interface AllDocsRow<T extends { _id: string }> {
 			id: string;
 			key: string;
-			value: {
+			value?: {
 				rev: string;
 				deleted?: boolean;
 			};
+			error?: string;
+			reason?: string;
 			doc?: T & ExistingDocument;
 		}
 

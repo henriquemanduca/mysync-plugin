@@ -231,7 +231,7 @@ export class SyncService {
 			]));
 			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
-			const restoreResult = await this.restoreVaultFiles();
+			const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
 			const skipped = restoreResult.skipped + deletionResult.skipped;
 			const conflicts = restoreResult.conflicts + deletionResult.conflicts;
 
@@ -310,6 +310,8 @@ export class SyncService {
 	): Promise<"deleted" | "skipped" | "conflict"> {
 		const rawPath = getPathFromFileRecordId(recordId);
 
+		logger.info(`[deleteRemoteDeletedFile] recordId=${recordId}, rawPath=${rawPath}`);
+
 		if (!rawPath) {
 			return "skipped";
 		}
@@ -318,6 +320,7 @@ export class SyncService {
 		const syncFolder = this.getCurrentSyncFolder();
 
 		if (!path || !isPathInsideSyncFolder(path, syncFolder)) {
+			logger.warn(`[deleteRemoteDeletedFile] SKIPPED: path="${path}" outside sync folder or empty (syncFolder="${syncFolder}")`);
 			return "skipped";
 		}
 
@@ -325,18 +328,24 @@ export class SyncService {
 		const localRecord = localRecordsById.get(recordId);
 
 		if (!existingFile) {
+			logger.warn(`[deleteRemoteDeletedFile] SKIPPED: file not found at path="${path}" (recordId="${recordId}")`);
+			await this.store.deleteFileRecordById(recordId);
 			return "skipped";
 		}
 
 		if (!(existingFile instanceof TFile)) {
+			logger.warn(`[deleteRemoteDeletedFile] CONFLICT: not a TFile at "${path}" (type=${existingFile.constructor.name})`);
 			return "conflict";
 		}
 
 		if (localRecord && !(await this.localFileMatchesRecord(existingFile, localRecord))) {
+			logger.warn(`[deleteRemoteDeletedFile] CONFLICT: localFileMatchesRecord returned false for "${path}" (recordId="${recordId}")`);
 			return "conflict";
 		}
 
 		await this.app.vault.delete(existingFile);
+		await this.store.deleteFileRecordById(recordId);
+		logger.info(`[deleteRemoteDeletedFile] DELETED: "${path}" successfully removed`);
 		return "deleted";
 	}
 
@@ -454,7 +463,7 @@ export class SyncService {
 		};
 	}
 
-	private async restoreVaultFiles(): Promise<RestoreResult> {
+	private async restoreVaultFiles(deletedRecordIds = new Set<string>()): Promise<RestoreResult> {
 		let restored = 0;
 		let skipped = 0;
 		let conflicts = 0;
@@ -465,7 +474,7 @@ export class SyncService {
 			let restoreStatus: "restored" | "skipped" | "conflict";
 
 			try {
-				restoreStatus = await this.restoreVaultFile(record);
+				restoreStatus = deletedRecordIds.has(record._id) ? "skipped" : await this.restoreVaultFile(record);
 			} catch (error) {
 				logger.warn("Skipped remote file during restore", error, { path: record.path });
 				restoreStatus = "skipped";
@@ -509,7 +518,7 @@ export class SyncService {
 				return "skipped";
 			}
 
-			await this.overwriteLocalFile(record, path);
+			await this.overwriteLocalFile(record, existingFile);
 			return "restored";
 		}
 
@@ -544,20 +553,15 @@ export class SyncService {
 		return "skipped";
 	}
 
-	private async overwriteLocalFile(record: VaultFileRecord, path: string): Promise<void> {
+	private async overwriteLocalFile(record: VaultFileRecord, existingFile: TFile): Promise<void> {
 		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
 
-		const existing = this.app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile || existing instanceof TFolder) {
-			await this.app.vault.delete(existing);
-		}
-
 		if (fileTypeIstext) {
-			await this.app.vault.create(path, record.content!);
+			await this.app.vault.modify(existingFile, record.content!);
 
 		} else if (!fileTypeIstext && typeof record._attachments?.file?.data !== "undefined") {
 			const data = await getAttachmentArrayBuffer(record);
-			if (data) await this.app.vault.createBinary(path, data);
+			if (data) await this.app.vault.modifyBinary(existingFile, data);
 		}
 	}
 
@@ -630,11 +634,11 @@ export class SyncService {
 	}
 
 	private scheduleQueuedSync() {
-		logger.method("scheduleQueuedSync", {
-			pending: this.pendingSyncPaths.size,
-			syncInProgress: this.syncInProgress,
-			hasTimer: this.syncQueueTimer !== null
-		});
+		// logger.method("scheduleQueuedSync", {
+		// 	pending: this.pendingSyncPaths.size,
+		// 	syncInProgress: this.syncInProgress,
+		// 	hasTimer: this.syncQueueTimer !== null
+		// });
 
 		if (this.pendingSyncPaths.size === 0 || this.syncInProgress || this.syncQueueTimer !== null) {
 			return;
@@ -647,10 +651,10 @@ export class SyncService {
 	}
 
 	private async syncQueuedFiles() {
-		logger.method("syncQueuedFiles", {
-			pending: this.pendingSyncPaths.size,
-			syncInProgress: this.syncInProgress
-		});
+		// logger.method("syncQueuedFiles", {
+		// 	pending: this.pendingSyncPaths.size,
+		// 	syncInProgress: this.syncInProgress
+		// });
 
 		if (this.syncInProgress || this.pendingSyncPaths.size === 0) {
 			return;

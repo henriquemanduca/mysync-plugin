@@ -22,6 +22,14 @@ export interface RemotePullResult {
 
 const logger = new Logger("PouchDbFileStore");
 
+type OpenRevision<T extends { _id: string }> =
+	| { ok: (T & PouchDB.ExistingDocument) | (PouchDB.ExistingDocument & { _deleted: true }) }
+	| { missing: string };
+
+type PouchDbOpenRevisions<T extends { _id: string }> = PouchDB.Database<T> & {
+	get(id: string, options: { open_revs: "all" }): Promise<Array<OpenRevision<T>>>;
+};
+
 export class PouchDbFileStore {
 	private fileDb: PouchDB<VaultFileRecord>;
 	private fileDbClosed = false;
@@ -65,13 +73,17 @@ export class PouchDbFileStore {
 	}
 
 	async deleteFileRecordByPath(path: string) {
+		await this.deleteFileRecordById(createFileRecordId(path));
+	}
+
+	async deleteFileRecordById(recordId: string) {
 		return this.runWithLocalDb(async (fileDb) => {
 			try {
-				const existing = await fileDb.get(createFileRecordId(path));
+				const existing = await fileDb.get(recordId);
 				await fileDb.remove(existing);
 			} catch (error) {
 				if (!isPouchNotFound(error)) {
-					logger.error("Failed to remove deleted file record", error, { path });
+					logger.error("Failed to remove deleted file record", error, { recordId });
 				}
 			}
 		});
@@ -151,17 +163,32 @@ export class PouchDbFileStore {
 		}
 
 		return this.runWithLocalDb(async (fileDb) => {
-			const result = await fileDb.allDocs({
-				keys: Array.from(new Set(recordIds))
-			});
+			const uniqueRecordIds = Array.from(new Set(recordIds));
+			const deletedRecordIds = new Set<string>();
 
-			return result.rows.flatMap((row) => {
-				if (row.value?.deleted && row.id.startsWith("vault-file:")) {
-					return [row.id];
+			await Promise.all(uniqueRecordIds.map(async (recordId) => {
+				if (!recordId.startsWith("vault-file:")) {
+					return;
 				}
 
-				return [];
-			});
+				try {
+					const revisions = await (fileDb as PouchDbOpenRevisions<VaultFileRecord>)
+						.get(recordId, { open_revs: "all" });
+
+					for (const revision of revisions) {
+						if ("ok" in revision && "_deleted" in revision.ok && revision.ok._deleted) {
+							deletedRecordIds.add(recordId);
+							return;
+						}
+					}
+				} catch (error) {
+					if (!isPouchNotFound(error)) {
+						throw error;
+					}
+				}
+			}));
+
+			return Array.from(deletedRecordIds);
 		});
 	}
 
