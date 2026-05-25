@@ -67,14 +67,14 @@ export class SyncService {
 	}
 
 	isRunning(): boolean {
-		if (this.syncInProgress) new Notice("MySync is already running.");
+		if (this.syncInProgress) new Notice("MySync is already running");
 		return this.syncInProgress;
 	}
 
 	async syncNow() {
 		if (this.isRunning()) return;
 
-		new Notice("Starting.");
+		new Notice("Starting");
 		this.syncInProgress = true;
 		let failed = false;
 
@@ -87,7 +87,7 @@ export class SyncService {
 				skipped: result.skipped
 			});
 			// new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
-			new Notice(`Saved ${result.saved} vault files to PouchDB.`);
+			new Notice(`Saved ${result.saved} vault files to PouchDB`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -95,7 +95,7 @@ export class SyncService {
 				state: "error",
 				message: "synchronization failed"
 			});
-			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details"));
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
@@ -126,7 +126,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("MySync start pushing.", 0);
+		const notice = new Notice("MySync start pushing", 0);
 		try {
 			const result = await this.syncLocalFiles();
 
@@ -161,7 +161,7 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
-			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB.`);
+			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB`);
 		} catch (error) {
 			failed = true;
 			logger.error("CouchDB push failed", error);
@@ -169,7 +169,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB push failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details"));
 		} finally {
 			notice.hide()
 
@@ -252,7 +252,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB pull failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details"));
 		} finally {
 			notice.hide();
 			this.syncInProgress = false;
@@ -310,8 +310,6 @@ export class SyncService {
 	): Promise<"deleted" | "skipped" | "conflict"> {
 		const rawPath = getPathFromFileRecordId(recordId);
 
-		logger.info(`[deleteRemoteDeletedFile] recordId=${recordId}, rawPath=${rawPath}`);
-
 		if (!rawPath) {
 			return "skipped";
 		}
@@ -320,7 +318,6 @@ export class SyncService {
 		const syncFolder = this.getCurrentSyncFolder();
 
 		if (!path || !isPathInsideSyncFolder(path, syncFolder)) {
-			logger.warn(`[deleteRemoteDeletedFile] SKIPPED: path="${path}" outside sync folder or empty (syncFolder="${syncFolder}")`);
 			return "skipped";
 		}
 
@@ -328,24 +325,20 @@ export class SyncService {
 		const localRecord = localRecordsById.get(recordId);
 
 		if (!existingFile) {
-			logger.warn(`[deleteRemoteDeletedFile] SKIPPED: file not found at path="${path}" (recordId="${recordId}")`);
 			await this.store.deleteFileRecordById(recordId);
 			return "skipped";
 		}
 
 		if (!(existingFile instanceof TFile)) {
-			logger.warn(`[deleteRemoteDeletedFile] CONFLICT: not a TFile at "${path}" (type=${existingFile.constructor.name})`);
 			return "conflict";
 		}
 
 		if (localRecord && !(await this.localFileMatchesRecord(existingFile, localRecord))) {
-			logger.warn(`[deleteRemoteDeletedFile] CONFLICT: localFileMatchesRecord returned false for "${path}" (recordId="${recordId}")`);
 			return "conflict";
 		}
 
 		await this.app.vault.delete(existingFile);
 		await this.store.deleteFileRecordById(recordId);
-		logger.info(`[deleteRemoteDeletedFile] DELETED: "${path}" successfully removed`);
 		return "deleted";
 	}
 
@@ -403,7 +396,7 @@ export class SyncService {
 				databaseName: result.databaseName,
 				documentCount: result.documentCount
 			});
-			new Notice("Connected to CouchDB database.");
+			new Notice("Connected to CouchDB database");
 		} catch (error) {
 			failed = true;
 			logger.error("CouchDB connection test failed", error);
@@ -411,7 +404,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB connection failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB connection failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB connection failed. Check the console for details"));
 		} finally {
 			this.syncInProgress = false;
 
@@ -704,7 +697,7 @@ export class SyncService {
 				state: "error",
 				message: "Incremental sync failed"
 			});
-			new Notice("MySync incremental sync failed. Check the console for details.");
+			new Notice("MySync incremental sync failed. Check the console for details");
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
