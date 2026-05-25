@@ -67,14 +67,14 @@ export class SyncService {
 	}
 
 	isRunning(): boolean {
-		if (this.syncInProgress) new Notice("MySync is already running.");
+		if (this.syncInProgress) new Notice("MySync is already running");
 		return this.syncInProgress;
 	}
 
 	async syncNow() {
 		if (this.isRunning()) return;
 
-		new Notice("Starting.");
+		new Notice("Starting");
 		this.syncInProgress = true;
 		let failed = false;
 
@@ -87,7 +87,7 @@ export class SyncService {
 				skipped: result.skipped
 			});
 			// new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
-			new Notice(`Saved ${result.saved} vault files to PouchDB.`);
+			new Notice(`Saved ${result.saved} vault files to PouchDB`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -95,7 +95,7 @@ export class SyncService {
 				state: "error",
 				message: "synchronization failed"
 			});
-			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details"));
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
@@ -126,7 +126,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("MySync start pushing.", 0);
+		const notice = new Notice("MySync start pushing", 0);
 		try {
 			const result = await this.syncLocalFiles();
 
@@ -161,7 +161,7 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
-			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB.`);
+			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB`);
 		} catch (error) {
 			failed = true;
 			logger.error("CouchDB push failed", error);
@@ -169,7 +169,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB push failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details"));
 		} finally {
 			notice.hide()
 
@@ -231,7 +231,7 @@ export class SyncService {
 			]));
 			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
-			const restoreResult = await this.restoreVaultFiles();
+			const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
 			const skipped = restoreResult.skipped + deletionResult.skipped;
 			const conflicts = restoreResult.conflicts + deletionResult.conflicts;
 
@@ -252,7 +252,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB pull failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details"));
 		} finally {
 			notice.hide();
 			this.syncInProgress = false;
@@ -325,6 +325,7 @@ export class SyncService {
 		const localRecord = localRecordsById.get(recordId);
 
 		if (!existingFile) {
+			await this.store.deleteFileRecordById(recordId);
 			return "skipped";
 		}
 
@@ -337,6 +338,7 @@ export class SyncService {
 		}
 
 		await this.app.vault.delete(existingFile);
+		await this.store.deleteFileRecordById(recordId);
 		return "deleted";
 	}
 
@@ -394,7 +396,7 @@ export class SyncService {
 				databaseName: result.databaseName,
 				documentCount: result.documentCount
 			});
-			new Notice("Connected to CouchDB database.");
+			new Notice("Connected to CouchDB database");
 		} catch (error) {
 			failed = true;
 			logger.error("CouchDB connection test failed", error);
@@ -402,7 +404,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB connection failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB connection failed. Check the console for details."));
+			new Notice(getErrorMessage(error, "CouchDB connection failed. Check the console for details"));
 		} finally {
 			this.syncInProgress = false;
 
@@ -454,7 +456,7 @@ export class SyncService {
 		};
 	}
 
-	private async restoreVaultFiles(): Promise<RestoreResult> {
+	private async restoreVaultFiles(deletedRecordIds = new Set<string>()): Promise<RestoreResult> {
 		let restored = 0;
 		let skipped = 0;
 		let conflicts = 0;
@@ -465,7 +467,7 @@ export class SyncService {
 			let restoreStatus: "restored" | "skipped" | "conflict";
 
 			try {
-				restoreStatus = await this.restoreVaultFile(record);
+				restoreStatus = deletedRecordIds.has(record._id) ? "skipped" : await this.restoreVaultFile(record);
 			} catch (error) {
 				logger.warn("Skipped remote file during restore", error, { path: record.path });
 				restoreStatus = "skipped";
@@ -509,7 +511,7 @@ export class SyncService {
 				return "skipped";
 			}
 
-			await this.overwriteLocalFile(record, path);
+			await this.overwriteLocalFile(record, existingFile);
 			return "restored";
 		}
 
@@ -544,20 +546,15 @@ export class SyncService {
 		return "skipped";
 	}
 
-	private async overwriteLocalFile(record: VaultFileRecord, path: string): Promise<void> {
+	private async overwriteLocalFile(record: VaultFileRecord, existingFile: TFile): Promise<void> {
 		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
 
-		const existing = this.app.vault.getAbstractFileByPath(path);
-		if (existing instanceof TFile || existing instanceof TFolder) {
-			await this.app.vault.delete(existing);
-		}
-
 		if (fileTypeIstext) {
-			await this.app.vault.create(path, record.content!);
+			await this.app.vault.modify(existingFile, record.content!);
 
 		} else if (!fileTypeIstext && typeof record._attachments?.file?.data !== "undefined") {
 			const data = await getAttachmentArrayBuffer(record);
-			if (data) await this.app.vault.createBinary(path, data);
+			if (data) await this.app.vault.modifyBinary(existingFile, data);
 		}
 	}
 
@@ -630,11 +627,11 @@ export class SyncService {
 	}
 
 	private scheduleQueuedSync() {
-		logger.method("scheduleQueuedSync", {
-			pending: this.pendingSyncPaths.size,
-			syncInProgress: this.syncInProgress,
-			hasTimer: this.syncQueueTimer !== null
-		});
+		// logger.method("scheduleQueuedSync", {
+		// 	pending: this.pendingSyncPaths.size,
+		// 	syncInProgress: this.syncInProgress,
+		// 	hasTimer: this.syncQueueTimer !== null
+		// });
 
 		if (this.pendingSyncPaths.size === 0 || this.syncInProgress || this.syncQueueTimer !== null) {
 			return;
@@ -647,10 +644,10 @@ export class SyncService {
 	}
 
 	private async syncQueuedFiles() {
-		logger.method("syncQueuedFiles", {
-			pending: this.pendingSyncPaths.size,
-			syncInProgress: this.syncInProgress
-		});
+		// logger.method("syncQueuedFiles", {
+		// 	pending: this.pendingSyncPaths.size,
+		// 	syncInProgress: this.syncInProgress
+		// });
 
 		if (this.syncInProgress || this.pendingSyncPaths.size === 0) {
 			return;
@@ -700,7 +697,7 @@ export class SyncService {
 				state: "error",
 				message: "Incremental sync failed"
 			});
-			new Notice("MySync incremental sync failed. Check the console for details.");
+			new Notice("MySync incremental sync failed. Check the console for details");
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
