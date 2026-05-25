@@ -23,7 +23,7 @@ export default class MySyncPlugin extends Plugin {
 			this.updateSyncStatus(status)
 		);
 
-		this.addRibbonIcon("refresh-cw", "Sync local to remote", async () => {
+		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
 			await this.syncService.syncNow();
 			await this.syncService.pushToCouchDb();
 		});
