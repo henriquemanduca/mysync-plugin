@@ -1,7 +1,7 @@
 {
-	"name": "plugin-mysync",
-	"version": "0.1.0",
-	"description": "An Obsidian plugin scaffold for syncing with MySync.",
+	"name": "mysync",
+	"version": "0.1.1",
+	"description": "An Obsidian plugin for syncing files with your personal server.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
@@ -11,7 +11,8 @@
 	},
 	"keywords": [
 		"obsidian",
-		"obsidian-plugin"
+		"plugin",
+		"syncing"
 	],
 	"author": "",
 	"license": "MIT",
