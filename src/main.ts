@@ -5,11 +5,13 @@ import { SyncService, type SyncStatus } from "sync/sync-service";
 import { Logger } from 'utils/logger';
 
 const logger = new Logger("MySyncPlugin");
+const IDLE_STATUS_DELAY_MS = 5000;
 
 export default class MySyncPlugin extends Plugin {
 	settings!: MySyncSettings;
 	private syncService!: SyncService;
 	private statusBarEl!: HTMLElement;
+	private idleStatusTimer: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -24,7 +26,7 @@ export default class MySyncPlugin extends Plugin {
 		);
 
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
-			await this.syncService.syncNow();
+			// await this.syncService.syncNow();
 			await this.syncService.pushToCouchDb();
 		});
 
@@ -94,6 +96,7 @@ export default class MySyncPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.clearIdleStatusTimer();
 		this.syncService.close();
 		// Obsidian automatically disposes registered events, commands, and intervals.
 	}
@@ -112,6 +115,7 @@ export default class MySyncPlugin extends Plugin {
 	}
 
 	private updateSyncStatus(status: SyncStatus) {
+		this.clearIdleStatusTimer();
 		this.statusBarEl.empty();
 		this.statusBarEl.addClass("mysync-status");
 
@@ -134,8 +138,9 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "done") {
-    		this.statusBarEl.setText("done");
+			this.statusBarEl.setText("done");
 			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
+			this.scheduleIdleStatus();
 			return;
 		}
 
@@ -148,6 +153,7 @@ export default class MySyncPlugin extends Plugin {
 		if (status.state === "pushed") {
 			this.statusBarEl.setText(`pushed ${status.docsWritten}`);
 			this.statusBarEl.title = "Push complete";
+			this.scheduleIdleStatus();
 			return;
 		}
 
@@ -160,6 +166,7 @@ export default class MySyncPlugin extends Plugin {
 		if (status.state === "pulled") {
 			this.statusBarEl.setText(`restored ${status.restored}, deleted ${status.deleted}`);
 			this.statusBarEl.title = `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
+			this.scheduleIdleStatus();
 			return;
 		}
 
@@ -184,11 +191,29 @@ export default class MySyncPlugin extends Plugin {
 		if (status.state === "tested") {
 			this.statusBarEl.setText("tested");
 			this.statusBarEl.title = `Connected to ${status.databaseName}`;
+			this.scheduleIdleStatus();
 			return;
 		}
 
 		this.statusBarEl.setText("MySync error");
 		this.statusBarEl.title = status.message;
+		this.scheduleIdleStatus();
+	}
+
+	private scheduleIdleStatus() {
+		this.idleStatusTimer = window.setTimeout(() => {
+			this.idleStatusTimer = null;
+			this.updateSyncStatus({ state: "idle" });
+		}, IDLE_STATUS_DELAY_MS);
+	}
+
+	private clearIdleStatusTimer() {
+		if (this.idleStatusTimer === null) {
+			return;
+		}
+
+		window.clearTimeout(this.idleStatusTimer);
+		this.idleStatusTimer = null;
 	}
 }
 
