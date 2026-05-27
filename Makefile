@@ -1,19 +1,16 @@
 PLUGIN_ID := mysync
+OBSIDIAN_VAULTS := /home/henrique/projetos/pessoal/note-brain /home/henrique/projetos/note-brain-out
 
-ifdef OBSIDIAN_VAULT
-OBSIDIAN_PLUGIN_DIR ?= $(OBSIDIAN_VAULT)/.obsidian/plugins/$(PLUGIN_ID)
-endif
-
-.PHONY: build deploy check-deploy-dir deploy-test deploy-prod
+.PHONY: build deploy deploy-test deploy-prod
 
 build:
 	npm run build
 
-check-deploy-dir:
-	@test -n "$(OBSIDIAN_PLUGIN_DIR)" || (echo "Set OBSIDIAN_VAULT or OBSIDIAN_PLUGIN_DIR"; exit 1)
-
-deploy: build check-deploy-dir
-	mkdir -p "$(OBSIDIAN_PLUGIN_DIR)"
-	cp dist/main.js "$(OBSIDIAN_PLUGIN_DIR)/main.js"
-	cp dist/manifest.json "$(OBSIDIAN_PLUGIN_DIR)/manifest.json"
-	cp dist/styles.css "$(OBSIDIAN_PLUGIN_DIR)/styles.css"
+deploy: build
+	@for vault in $(OBSIDIAN_VAULTS); do \
+		plugin_dir="$$vault/.obsidian/plugins/$(PLUGIN_ID)"; \
+		mkdir -p "$$plugin_dir"; \
+		cp dist/main.js "$$plugin_dir/main.js"; \
+		cp dist/manifest.json "$$plugin_dir/manifest.json"; \
+		cp dist/styles.css "$$plugin_dir/styles.css"; \
+	done
