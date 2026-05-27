@@ -128,8 +128,8 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "syncing") {
-			this.statusBarEl.setText(`local ${status.current}/${status.total}`);
-			this.statusBarEl.title = `Syncing local files. Saved ${status.saved}, skipped ${status.skipped}`;
+			this.statusBarEl.setText(`${status.current}/${status.total}`);
+			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
 			return;
 		}
 
@@ -140,20 +140,26 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "pushing") {
-			this.statusBarEl.setText("pushing");
-			this.statusBarEl.title = "Pushing to remote.";
+			this.statusBarEl.setText(`pushing ${status.docsWritten}`);
+			this.statusBarEl.title = "Pushing to remote";
 			return;
 		}
 
 		if (status.state === "pushed") {
-			this.statusBarEl.setText("pushed");
-			this.statusBarEl.title = "Push complete.";
+			this.statusBarEl.setText(`pushed ${status.docsWritten}`);
+			this.statusBarEl.title = "Push complete";
 			return;
 		}
 
 		if (status.state === "pulling") {
-			this.statusBarEl.setText("pulling");
-			this.statusBarEl.title = "Pulling from CouchDB.";
+			this.statusBarEl.setText(`pulling ${status.docsRead}`);
+			this.statusBarEl.title = "Pulling from CouchDB";
+			return;
+		}
+
+		if (status.state === "pulled") {
+			this.statusBarEl.setText(`restored ${status.restored}, deleted ${status.deleted}`);
+			this.statusBarEl.title = `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
@@ -166,12 +172,6 @@ export default class MySyncPlugin extends Plugin {
 		if (status.state === "restoring") {
 			this.statusBarEl.setText(`restore ${status.current}, skipped ${status.skipped}`);
 			this.statusBarEl.title = `Restoring files. Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
-			return;
-		}
-
-		if (status.state === "pulled") {
-			this.statusBarEl.setText(`pulled ${status.restored}/${status.deleted}`);
-			this.statusBarEl.title = `Pull complete. Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
