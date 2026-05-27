@@ -74,7 +74,6 @@ export class SyncService {
 	async syncNow() {
 		if (this.isRunning()) return;
 
-		new Notice("Starting");
 		this.syncInProgress = true;
 		let failed = false;
 
@@ -86,8 +85,7 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
-			// new Notice(`Saved ${result.saved} vault files to PouchDB. Skipped ${result.skipped} unchanged.`);
-			new Notice(`Saved ${result.saved} vault files to PouchDB`);
+			new Notice(`Read ${result.saved} vault files, skipped ${result.skipped} unchanged.`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -107,8 +105,6 @@ export class SyncService {
 	}
 
 	async pushToCouchDb() {
-		logger.method("pushToCouchDb", { syncInProgress: this.syncInProgress });
-
 		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
@@ -126,7 +122,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("MySync start pushing", 0);
+		const notice = new Notice("Start pushing", 0);
 		try {
 			const result = await this.syncLocalFiles();
 
@@ -157,15 +153,16 @@ export class SyncService {
 				docsWritten: pushResult.docsWritten
 			});
 
-			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB`);
+			new Notice(`Pushed ${pushResult.docsWritten} document(s)`);
 		} catch (error) {
+			notice.hide()
 			failed = true;
-			logger.error("CouchDB push failed", error);
+			logger.error("Push failed", error);
 			this.onStatusChange({
 				state: "error",
-				message: "CouchDB push failed"
+				message: "Push failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB push failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "Push failed. Check the console for details"));
 		} finally {
 			notice.hide()
 
