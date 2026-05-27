@@ -137,11 +137,6 @@ export class SyncService {
 				skipped: result.skipped
 			});
 
-			this.onStatusChange({
-				state: "pushing",
-				docsWritten: 0
-			});
-
 			const pushResult = await this.store.pushToCouchDb(
 				{
 					url: settings.couchDbUrl,
@@ -161,6 +156,7 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+
 			new Notice(`Pushed ${pushResult.docsWritten} document changes to CouchDB`);
 		} catch (error) {
 			failed = true;
@@ -198,14 +194,9 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
+		const notice = new Notice("Start pulling", 0);
 
-		const notice = new Notice("MySync start pulling", 0);
 		try {
-			this.onStatusChange({
-				state: "pulling",
-				docsRead: 0
-			});
-
 			const localRecordsBeforePull = await this.store.listFileRecords();
 			const localRecordsById = new Map(localRecordsBeforePull.map((record) => [record._id, record]));
 			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
@@ -229,6 +220,7 @@ export class SyncService {
 				...localRecordsById.keys(),
 				...localVaultRecordIds
 			]));
+
 			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
 			const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
@@ -243,6 +235,7 @@ export class SyncService {
 				skipped,
 				conflicts
 			});
+
 			new Notice(
 				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
 			);
