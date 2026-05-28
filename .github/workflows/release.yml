@@ -58,6 +58,21 @@ jobs:
                     exit 1
                   fi
 
+            - name: Create zip package
+              shell: bash
+              run: |
+                  TAG="${GITHUB_REF#refs/tags/}"
+                  mkdir -p release-package
+                  cp dist/main.js release-package/main.js
+                  cp dist/manifest.json release-package/manifest.json
+                  
+                  if [ -f dist/styles.css ]; then
+                    cp dist/styles.css release-package/styles.css
+                  fi
+                  
+                  cd release-package
+                  zip -r "../mysync-${TAG}.zip" .
+
             - name: Create GitHub release
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -68,6 +83,7 @@ jobs:
                   ASSETS=(
                     "dist/main.js#main.js"
                     "dist/manifest.json#manifest.json"
+                    "mysync-${TAG}.zip#mysync-${TAG}.zip"
                   )
                   
                   if [ -f dist/styles.css ]; then
