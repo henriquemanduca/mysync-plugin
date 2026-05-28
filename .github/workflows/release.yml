@@ -28,24 +28,35 @@ jobs:
               shell: bash
               run: |
                   TAG="${GITHUB_REF#refs/tags/}"
-                  VERSION="$(node -p "require('./manifest.json').version")"
+                  VERSION="$(node -p "JSON.parse(require('fs').readFileSync('./manifest.json', 'utf8')).version")"
                   
                   echo "Tag: $TAG"
                   echo "Manifest version: $VERSION"
                   
                   if [ "$TAG" != "$VERSION" ]; then
-                    echo "Tag does not match manifest.json version"
+                    echo "::error::Tag does not match manifest.json version"
                     exit 1
                   fi
 
             - name: Build plugin
               run: npm run build
 
-            - name: Verify required release files
+            - name: Inspect dist output
               shell: bash
               run: |
-                  test -f main.js || (echo "main.js not found" && exit 1)
-                  test -f manifest.json || (echo "manifest.json not found" && exit 1)
+                  echo "Contents of dist/:"
+                  ls -la dist || true
+
+            - name: Verify release assets
+              shell: bash
+              run: |
+                  test -f dist/main.js || (echo "::error::dist/main.js not found" && exit 1)
+                  test -f dist/manifest.json || (echo "::error::dist/manifest.json not found" && exit 1)
+                  
+                  if [ -f styles.css ] && [ ! -f dist/styles.css ]; then
+                    echo "::error::styles.css exists in repo but dist/styles.css was not generated"
+                    exit 1
+                  fi
 
             - name: Create GitHub release
               env:
@@ -54,14 +65,17 @@ jobs:
               run: |
                   TAG="${GITHUB_REF#refs/tags/}"
                   
-                  FILES="main.js manifest.json"
+                  ASSETS=(
+                    "dist/main.js#main.js"
+                    "dist/manifest.json#manifest.json"
+                  )
                   
-                  if [ -f styles.css ]; then
-                    FILES="$FILES styles.css"
+                  if [ -f dist/styles.css ]; then
+                    ASSETS+=("dist/styles.css#styles.css")
                   fi
                   
                   gh release create "$TAG" \
                     --title="$TAG" \
                     --draft \
                     --generate-notes \
-                    $FILES
+                    "${ASSETS[@]}"
