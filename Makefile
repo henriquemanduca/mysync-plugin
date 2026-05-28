@@ -1,7 +1,10 @@
 PLUGIN_ID := mysync
 OBSIDIAN_VAULTS := /home/henrique/projetos/pessoal/note-brain /home/henrique/projetos/note-brain-out
 
-.PHONY: build deploy deploy-test deploy-prod
+.PHONY: version build deploy
+
+version:
+	npm version patch
 
 build:
 	npm run build
