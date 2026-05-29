@@ -1,4 +1,3 @@
-import type { TFile } from "obsidian";
 import PouchDB from "pouchdb";
 import type { VaultFileRecord } from "sync/types";
 import { createFileRecordId } from "sync/vault-files";
@@ -39,13 +38,23 @@ export class PouchDbFileStore {
 		this.fileDb = new PouchDB<VaultFileRecord>(localDatabaseName);
 	}
 
-	async hasFileChanged(file: TFile) {
+	async saveFileRecordIfChanged(record: VaultFileRecord) {
 		return this.runWithLocalDb(async (fileDb) => {
 			try {
-				const existing = await fileDb.get(createFileRecordId(file.path));
-				return existing.lastChanged !== file.stat.mtime;
+				const existing = await fileDb.get(record._id);
+
+				if (existing.contentHash === record.contentHash) {
+					return false;
+				}
+
+				await fileDb.put({
+					...record,
+					_rev: existing._rev
+				});
+				return true;
 			} catch (error) {
 				if (isPouchNotFound(error)) {
+					await fileDb.put(record);
 					return true;
 				}
 

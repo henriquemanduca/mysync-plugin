@@ -4,8 +4,11 @@ import type { PouchDbFileStore } from "sync/pouchdb-store";
 import type { VaultFileRecord } from "sync/types";
 import {
 	collectFilesInFolder,
+	createBinaryContentHash,
 	createFileRecord,
 	createFileRecordId,
+	createLocalFileContentHash,
+	createTextContentHash,
 	getPathFromFileRecordId,
 	getSyncFolder,
 	getSyncFolderState,
@@ -333,24 +336,12 @@ export class SyncService {
 	}
 
 	private async localFileMatchesRecord(file: TFile, record: VaultFileRecord) {
-		if (record.fileType === "markdown" && typeof record.content === "string") {
-			const localContent = await this.app.vault.read(file);
-			return localContent === record.content;
-		}
+		const [localHash, recordHash] = await Promise.all([
+			createLocalFileContentHash(this.app, file, record.fileType),
+			getRecordContentHash(record)
+		]);
 
-		const recordData = await getAttachmentArrayBuffer(record);
-
-		if (recordData) {
-			const localData = await this.app.vault.readBinary(file);
-			const [recordHash, localHash] = await Promise.all([
-				bufferHash(recordData),
-				bufferHash(localData)
-			]);
-
-			return recordHash === localHash;
-		}
-
-		return file.stat.size === record.size && file.stat.mtime === record.lastChanged;
+		return localHash === recordHash;
 	}
 
 	async testCouchDbConnection() {
@@ -497,7 +488,7 @@ export class SyncService {
 
 		const existingFile = this.app.vault.getAbstractFileByPath(path);
 		if (existingFile instanceof TFile) {
-			if (record.lastChanged <= existingFile.stat.mtime) {
+			if (await this.localFileMatchesRecord(existingFile, record)) {
 				return "skipped";
 			}
 
@@ -519,15 +510,6 @@ export class SyncService {
 		if (!fileTypeIstext) {
 			const data = await getAttachmentArrayBuffer(record);
 			if (!data) return "skipped";
-
-			if (existingFile instanceof TFile) {
-				const localData = await this.app.vault.readBinary(existingFile);
-				const [remoteHash, localHash] = await Promise.all([
-					bufferHash(data),
-					bufferHash(localData)
-				]);
-				if (remoteHash === localHash) return "skipped";
-			}
 
 			await this.app.vault.createBinary(path, data);
 			return "restored";
@@ -732,13 +714,8 @@ export class SyncService {
 	}
 
 	private async syncFileIfChanged(file: TFile) {
-		if (!(await this.store.hasFileChanged(file))) {
-			return false;
-		}
-
 		const record = await createFileRecord(this.app, file);
-		await this.store.saveFileRecord(record);
-		return true;
+		return this.store.saveFileRecordIfChanged(record);
 	}
 }
 
@@ -806,10 +783,19 @@ async function getAttachmentArrayBuffer(record: VaultFileRecord) {
 	return null;
 }
 
-async function bufferHash(buffer: ArrayBuffer): Promise<string> {
-	const digest = await crypto.subtle.digest('MD5', buffer);
-	// Cast ArrayBuffer → Uint8Array → hex string
-	return Array.from(new Uint8Array(digest))
-		.map(b => b.toString(16).padStart(2, '0'))
-		.join('');
+async function getRecordContentHash(record: VaultFileRecord) {
+	if (record.contentHash) {
+		return record.contentHash;
+	}
+
+	if (record.fileType === "markdown" && typeof record.content === "string") {
+		return createTextContentHash(record.content);
+	}
+
+	const data = await getAttachmentArrayBuffer(record);
+	if (data) {
+		return createBinaryContentHash(data);
+	}
+
+	return null;
 }
