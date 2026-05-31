@@ -2,7 +2,7 @@ import { Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "settings";
 import { PouchDbFileStore } from "sync/pouchdb-store";
 import { SyncService, type SyncStatus } from "sync/sync-service";
-import { Logger } from 'utils/logger';
+import { Logger } from "utils/logger";
 
 const logger = new Logger("MySyncPlugin");
 const IDLE_STATUS_DELAY_MS = 5000;
@@ -14,8 +14,8 @@ export default class MySyncPlugin extends Plugin {
 	private idleStatusTimer: number | null = null;
 
 	async onload() {
+		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
 		await this.loadSettings();
-		logger.method('onload', { settings: this.settings });
 
 		this.statusBarEl = this.addStatusBarItem();
 		this.updateSyncStatus({ state: "idle" });
@@ -98,6 +98,7 @@ export default class MySyncPlugin extends Plugin {
 	onunload() {
 		this.clearIdleStatusTimer();
 		this.syncService.close();
+		void Logger.flush();
 		// Obsidian automatically disposes registered events, commands, and intervals.
 	}
 
@@ -214,6 +215,10 @@ export default class MySyncPlugin extends Plugin {
 
 		window.clearTimeout(this.idleStatusTimer);
 		this.idleStatusTimer = null;
+	}
+
+	private getPluginDir() {
+		return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
 	}
 }
 

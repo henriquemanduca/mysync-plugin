@@ -198,7 +198,9 @@ export class SyncService {
 
 		try {
 			const localRecordsBeforePull = await this.store.listFileRecords();
-			const localRecordsById = new Map(localRecordsBeforePull.map((record) => [record._id, record]));
+			const localRecordsById = new Map(localRecordsBeforePull.map(
+				(record) => [record._id, record])
+			);
 			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
 
 			const pullResult = await this.store.pullFromCouchDb(
@@ -216,10 +218,12 @@ export class SyncService {
 				}
 			);
 
-			const deletionCandidateIds = Array.from(new Set([
-				...localRecordsById.keys(),
-				...localVaultRecordIds
-			]));
+			const deletionCandidateIds = Array.from(
+				new Set([
+					...localRecordsById.keys(),
+					...localVaultRecordIds
+				])
+			);
 
 			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
