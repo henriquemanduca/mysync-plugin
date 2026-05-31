@@ -2,7 +2,7 @@ import PouchDB from "pouchdb";
 import type { VaultFileRecord } from "sync/types";
 import { createFileRecordId } from "sync/vault-files";
 import { Logger } from 'utils/logger';
-import { isPouchConflict, isPouchNotFound } from "utils/pouchdb-errors";
+import { isPouchNotFound } from "utils/pouchdb-errors";
 
 export interface CouchDbConnection {
 	url: string;
