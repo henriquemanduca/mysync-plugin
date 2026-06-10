@@ -12,6 +12,9 @@ export interface MySyncSettings {
 	couchDbUsername: string;
 	couchDbPassword: string;
 	syncOnStartup: boolean;
+	lastSyncNowAt: string;
+	lastPushToCouchDbAt: string;
+	lastPullFromCouchDbAt: string;
 }
 
 export const DEFAULT_SETTINGS: MySyncSettings = {
@@ -22,11 +25,34 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	couchDbDatabase: "mysync",
 	couchDbUsername: "",
 	couchDbPassword: "",
-	syncOnStartup: false
+	syncOnStartup: false,
+	lastSyncNowAt: "",
+	lastPushToCouchDbAt: "",
+	lastPullFromCouchDbAt: ""
 };
 
 function isSyncFolderMode(value: string): value is SyncFolderMode {
 	return value === "vault-root" || value === "custom";
+}
+
+function formatLastExecutionAt(value: string): string {
+	if (!value) {
+		return "Never";
+	}
+
+	const date = new Date(value);
+
+	if (Number.isNaN(date.getTime())) {
+		return value;
+	}
+
+	const day = String(date.getDate()).padStart(2, "0");
+	const month = String(date.getMonth() + 1).padStart(2, "0");
+	const year = date.getFullYear();
+	const hour = String(date.getHours()).padStart(2, "0");
+	const minute = String(date.getMinutes()).padStart(2, "0");
+
+	return `${day}/${month}/${year} ${hour}:${minute}`;
 }
 
 export class MySyncSettingTab extends PluginSettingTab {
@@ -103,6 +129,33 @@ export class MySyncSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(localSectionEl)
+			.setName("Last sync now")
+			.setDesc("Last successful local sync execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatLastExecutionAt(this.plugin.settings.lastSyncNowAt));
+			});
+
+		new Setting(localSectionEl)
+			.setName("Last push to CouchDB")
+			.setDesc("Last successful remote push execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatLastExecutionAt(this.plugin.settings.lastPushToCouchDbAt));
+			});
+
+		new Setting(localSectionEl)
+			.setName("Last pull from CouchDB")
+			.setDesc("Last successful remote pull execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatLastExecutionAt(this.plugin.settings.lastPullFromCouchDbAt));
+			});
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")

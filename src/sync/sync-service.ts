@@ -52,6 +52,8 @@ export type SyncStatus =
 	| { state: "tested"; databaseName: string; documentCount?: number }
 	| { state: "error"; message: string };
 
+export type CompletedSyncOperation = "syncNow" | "pushToCouchDb" | "pullFromCouchDb";
+
 const logger = new Logger("SyncService");
 
 export class SyncService {
@@ -64,7 +66,8 @@ export class SyncService {
 		private app: App,
 		private store: PouchDbFileStore,
 		private getSettings: () => MySyncSettings,
-		private onStatusChange: (status: SyncStatus) => void
+		private onStatusChange: (status: SyncStatus) => void,
+		private onOperationCompleted: (operation: CompletedSyncOperation) => Promise<void>
 	) {
 		this.onStatusChange({ state: "idle" });
 	}
@@ -88,6 +91,7 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
+			await this.onOperationCompleted("syncNow");
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -155,6 +159,7 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+			await this.onOperationCompleted("pushToCouchDb");
 
 			new Notice(`Pushed ${pushResult.docsWritten} document(s)`);
 		} catch (error) {
@@ -239,6 +244,7 @@ export class SyncService {
 				skipped,
 				conflicts
 			});
+			await this.onOperationCompleted("pullFromCouchDb");
 
 			new Notice(
 				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`

@@ -21,8 +21,12 @@ export default class MySyncPlugin extends Plugin {
 		this.updateSyncStatus({ state: "idle" });
 
 		const fileStore = new PouchDbFileStore(createLocalDatabaseName(this.settings.localVaultId));
-		this.syncService = new SyncService(this.app, fileStore, () => this.settings, (status) =>
-			this.updateSyncStatus(status)
+		this.syncService = new SyncService(
+			this.app,
+			fileStore,
+			() => this.settings,
+			(status) => this.updateSyncStatus(status),
+			(operation) => this.saveCompletedSyncOperation(operation)
 		);
 
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
@@ -115,6 +119,20 @@ export default class MySyncPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
+		const completedAt = new Date().toISOString();
+
+		if (operation === "syncNow") {
+			this.settings.lastSyncNowAt = completedAt;
+		} else if (operation === "pushToCouchDb") {
+			this.settings.lastPushToCouchDbAt = completedAt;
+		} else {
+			this.settings.lastPullFromCouchDbAt = completedAt;
+		}
+
+		await this.saveSettings();
+	}
+
 	private updateSyncStatus(status: SyncStatus) {
 		this.clearIdleStatusTimer();
 		this.statusBarEl.empty();
@@ -142,8 +160,9 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "done") {
-			this.statusBarEl.setText("done");
-			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
+			const text = `Saved ${status.saved}, skipped ${status.skipped}`
+			this.statusBarEl.setText(text);
+			this.statusBarEl.title = text;
 			this.scheduleIdleStatus();
 			return;
 		}
