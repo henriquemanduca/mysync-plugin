@@ -181,8 +181,8 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "pulling") {
-			this.statusBarEl.setText(`pulling ${status.docsRead}`);
-			this.statusBarEl.title = "Pulling from CouchDB";
+			this.statusBarEl.setText(`reading ${status.docsRead}`);
+			this.statusBarEl.title = "Pulling from remote";
 			return;
 		}
 
@@ -195,13 +195,16 @@ export default class MySyncPlugin extends Plugin {
 
 		if (status.state === "deleting") {
 			this.statusBarEl.setText(`delete ${status.current}/${status.total}`);
-			this.statusBarEl.title = `Applying remote deletions. Deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
+			this.statusBarEl.title = `Deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 
 		if (status.state === "restoring") {
-			this.statusBarEl.setText(`restore ${status.current}, skipped ${status.skipped}`);
-			this.statusBarEl.title = `Restoring files. Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
+			const percent = status.total > 0
+				? Math.round((status.current / status.total) * 100)
+				: 0;
+			this.statusBarEl.setText(`restoring ${percent}%`);
+			this.statusBarEl.title = `Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
 			return;
 		}
 

@@ -128,7 +128,7 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("Start pushing", 0);
+		const notice = new Notice("Start pushing.", 0);
 		try {
 			// const result = await this.syncLocalFiles();
 			// this.onStatusChange({
@@ -161,7 +161,7 @@ export class SyncService {
 			});
 			await this.onOperationCompleted("pushToCouchDb");
 
-			new Notice(`Pushed ${pushResult.docsWritten} document(s)`);
+			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
 		} catch (error) {
 			notice.hide()
 			failed = true;
@@ -170,7 +170,7 @@ export class SyncService {
 				state: "error",
 				message: "Push failed"
 			});
-			new Notice(getErrorMessage(error, "Push failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "Push failed. Check the console for details."));
 		} finally {
 			notice.hide()
 
@@ -199,7 +199,7 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-		const notice = new Notice("Start pulling", 0);
+		const notice = new Notice("Start pulling.", 0);
 
 		try {
 			const localRecordsBeforePull = await this.store.listFileRecords();
@@ -247,7 +247,7 @@ export class SyncService {
 			await this.onOperationCompleted("pullFromCouchDb");
 
 			new Notice(
-				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
+				`Read ${pullResult.docsRead}. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
 			);
 		} catch (error) {
 			logger.error("CouchDB pull failed", error);
@@ -255,7 +255,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB pull failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details."));
 		} finally {
 			notice.hide();
 			this.syncInProgress = false;

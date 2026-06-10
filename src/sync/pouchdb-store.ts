@@ -162,7 +162,9 @@ export class PouchDbFileStore {
 				binary: true
 			});
 
-			return result.rows.flatMap((row) => (row.doc ? [row.doc] : []));
+			return result.rows.flatMap(
+				(row) => (row.doc ? [row.doc] : [])
+			);
 		});
 	}
 
