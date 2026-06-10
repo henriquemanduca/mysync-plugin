@@ -126,14 +126,15 @@ export class SyncService {
 
 		const notice = new Notice("Start pushing", 0);
 		try {
-			const result = await this.syncLocalFiles();
+			// const result = await this.syncLocalFiles();
+			// this.onStatusChange({
+			// 	state: "done",
+			// 	total: result.total,
+			// 	saved: result.saved,
+			// 	skipped: result.skipped
+			// });
 
-			this.onStatusChange({
-				state: "done",
-				total: result.total,
-				saved: result.saved,
-				skipped: result.skipped
-			});
+			await this.syncLocalFiles();
 
 			const pushResult = await this.store.pushToCouchDb(
 				{
