@@ -1,7 +1,8 @@
 import { Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "settings";
 import { PouchDbFileStore } from "sync/pouchdb-store";
-import { SyncService, type SyncStatus } from "sync/sync-service";
+import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/sync-service";
+import { formatDateTime } from "utils/date-format";
 import { Logger } from "utils/logger";
 
 const logger = new Logger("MySyncPlugin");
@@ -139,7 +140,8 @@ export default class MySyncPlugin extends Plugin {
 		this.statusBarEl.addClass("mysync-status");
 
 		if (status.state === "idle") {
-			this.statusBarEl.setText("...");
+			const lastPushAt = formatDateTime(this.settings.lastPushToCouchDbAt, { includeTime: true });
+			this.statusBarEl.setText(lastPushAt ? `Last push: ${lastPushAt}` : "...");
 			this.statusBarEl.title = "MySync is idle";
 			return;
 		}

@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MySyncPlugin from "main";
+import { formatDateTime } from "utils/date-format";
 
 export type SyncFolderMode = "vault-root" | "custom";
 
@@ -33,26 +34,6 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 
 function isSyncFolderMode(value: string): value is SyncFolderMode {
 	return value === "vault-root" || value === "custom";
-}
-
-function formatLastExecutionAt(value: string): string {
-	if (!value) {
-		return "Never";
-	}
-
-	const date = new Date(value);
-
-	if (Number.isNaN(date.getTime())) {
-		return value;
-	}
-
-	const day = String(date.getDate()).padStart(2, "0");
-	const month = String(date.getMonth() + 1).padStart(2, "0");
-	const year = date.getFullYear();
-	const hour = String(date.getHours()).padStart(2, "0");
-	const minute = String(date.getMinutes()).padStart(2, "0");
-
-	return `${day}/${month}/${year} ${hour}:${minute}`;
 }
 
 export class MySyncSettingTab extends PluginSettingTab {
@@ -136,7 +117,10 @@ export class MySyncSettingTab extends PluginSettingTab {
 			.addText((text) => {
 				text.inputEl.readOnly = true;
 				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatLastExecutionAt(this.plugin.settings.lastSyncNowAt));
+				text.setValue(formatDateTime(this.plugin.settings.lastSyncNowAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastSyncNowAt
+				}));
 			});
 
 		new Setting(localSectionEl)
@@ -145,7 +129,10 @@ export class MySyncSettingTab extends PluginSettingTab {
 			.addText((text) => {
 				text.inputEl.readOnly = true;
 				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatLastExecutionAt(this.plugin.settings.lastPushToCouchDbAt));
+				text.setValue(formatDateTime(this.plugin.settings.lastPushToCouchDbAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastPushToCouchDbAt
+				}));
 			});
 
 		new Setting(localSectionEl)
@@ -154,7 +141,10 @@ export class MySyncSettingTab extends PluginSettingTab {
 			.addText((text) => {
 				text.inputEl.readOnly = true;
 				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatLastExecutionAt(this.plugin.settings.lastPullFromCouchDbAt));
+				text.setValue(formatDateTime(this.plugin.settings.lastPullFromCouchDbAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastPullFromCouchDbAt
+				}));
 			});
 
 		new Setting(remoteSectionEl)
