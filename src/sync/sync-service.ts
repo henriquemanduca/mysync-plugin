@@ -70,7 +70,7 @@ export class SyncService {
 	}
 
 	isRunning(): boolean {
-		if (this.syncInProgress) new Notice("MySync is already running");
+		if (this.syncInProgress) new Notice("A sync process is already running.");
 		return this.syncInProgress;
 	}
 
@@ -88,7 +88,6 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
-			new Notice(`Read ${result.saved} vault files, skipped ${result.skipped} unchanged.`);
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -96,7 +95,7 @@ export class SyncService {
 				state: "error",
 				message: "synchronization failed"
 			});
-			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "Synchronization failed. Check the console for details."));
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();

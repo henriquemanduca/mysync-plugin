@@ -121,7 +121,7 @@ export default class MySyncPlugin extends Plugin {
 		this.statusBarEl.addClass("mysync-status");
 
 		if (status.state === "idle") {
-			this.statusBarEl.setText("idle");
+			this.statusBarEl.setText("...");
 			this.statusBarEl.title = "MySync is idle";
 			return;
 		}
@@ -133,7 +133,10 @@ export default class MySyncPlugin extends Plugin {
 		}
 
 		if (status.state === "syncing") {
-			this.statusBarEl.setText(`${status.current}/${status.total}`);
+			const percent = status.total > 0
+				? Math.round((status.current / status.total) * 100)
+				: 0;
+			this.statusBarEl.setText(`preparing ${percent}%`);
 			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
 			return;
 		}
