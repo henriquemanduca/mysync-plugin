@@ -16,7 +16,7 @@ sync provider.
 ## Features
 
 - Sync the full vault or a custom folder inside the vault.
-- Track Markdown files, common image formats, PDFs, and other vault files.
+- Track Markdown files, PDFs, and common image formats.
 - Push local vault changes to a CouchDB database.
 - Pull remote CouchDB changes back into the vault.
 - Test the remote CouchDB connection from Obsidian.
@@ -54,25 +54,6 @@ styles.css
 
 Reload Obsidian, open **Settings -> Community plugins**, and enable **MySync**.
 
-### Development Installation
-
-Clone this repository into your vault plugin folder:
-
-```text
-VaultFolder/.obsidian/plugins/mysync
-```
-
-Install dependencies and start the development build:
-
-```sh
-npm install
-npm run dev
-```
-
-`npm run dev` watches `src/main.ts` and emits plugin files into `dist/`.
-Reload Obsidian after starting the build, then enable the plugin from community
-plugin settings.
-
 ## Configuration
 
 Open **Settings -> MySync** in Obsidian.
@@ -100,22 +81,6 @@ Open **Settings -> MySync** in Obsidian.
 Use HTTPS for remote servers whenever possible. A dedicated CouchDB user with
 access only to the MySync database is recommended.
 
-## CouchDB Setup Helper
-
-This repository includes `.env.sample` and `setup_couchdb.sh` as optional
-helpers for preparing a CouchDB user and database security settings.
-
-Copy `.env.sample` to `.env`, adjust the values, make sure the database already
-exists, then run:
-
-```sh
-./setup_couchdb.sh
-```
-
-The script uses an admin account to create a plugin user and assign a role to
-the configured database. Review the script before running it against a real
-server.
-
 ## Usage
 
 MySync adds these command palette commands:
@@ -138,6 +103,8 @@ time when available.
 ## Safety Notes And Limitations
 
 - Back up your vault before first use and before testing pull behavior.
+- MySync has only been tested with `.md`, `.pdf`, and image files so far.
+  Other file types may not sync or restore correctly yet.
 - Remote pull can overwrite existing local files when the remote record differs.
 - Remote deletion handling avoids deleting locally changed files when a conflict
   is detected, but you should still review important files after sync.
@@ -148,7 +115,29 @@ time when available.
 - MySync does not currently provide end-to-end encryption.
 - No automated test framework is configured yet.
 
+## CouchDB Setup Helper
+
+This repository includes `.env.sample` and `setup_couchdb.sh` as optional
+helpers for preparing a CouchDB user and database security settings.
+
+Copy `.env.sample` to `.env`, adjust the values, make sure the database already
+exists, then run:
+
+```sh
+./setup_couchdb.sh
+```
+
+The script uses an admin account to create a plugin user and assign a role to
+the configured database. Review the script before running it against a real
+server.
+
 ## Development
+
+Clone this repository into your vault plugin folder:
+
+```text
+VaultFolder/.obsidian/plugins/mysync
+```
 
 Install dependencies:
 
@@ -170,6 +159,9 @@ npm run build
 
 `npm run build` runs TypeScript checks and produces the bundled plugin files in
 `dist/`.
+
+For local Obsidian testing, reload Obsidian after starting the development
+build, then enable the plugin from community plugin settings.
 
 To bump the plugin version, use:
 
