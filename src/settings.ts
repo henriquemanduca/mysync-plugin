@@ -41,6 +41,11 @@ function supportsDeclarativeSettings() {
 	return typeof (PluginSettingTab.prototype as { getSettingDefinitions?: unknown }).getSettingDefinitions === "function";
 }
 
+function refreshDomStateIfAvailable(settingTab: PluginSettingTab) {
+	const refreshDomState = (settingTab as unknown as { refreshDomState?: () => void }).refreshDomState;
+	refreshDomState?.call(settingTab);
+}
+
 export class MySyncSettingTab extends PluginSettingTab {
 	plugin: MySyncPlugin;
 
@@ -186,7 +191,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 				this.plugin.settings.syncFolderMode = syncFolderMode;
 				await this.plugin.saveSettings();
-				this.refreshDomState();
+				refreshDomStateIfAvailable(this);
 				return;
 			case "customSyncFolder":
 				this.plugin.settings.customSyncFolder = String(value).trim();
@@ -235,7 +240,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 	private createLegacySection(name: string): HTMLElement {
 		const sectionEl = this.containerEl.createDiv({ cls: "mysync-settings-section" });
-		sectionEl.createEl("h3", { text: name, cls: "mysync-settings-heading" });
+		new Setting(sectionEl).setName(name).setHeading();
 		return sectionEl;
 	}
 
