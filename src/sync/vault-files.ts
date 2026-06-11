@@ -1,4 +1,3 @@
-import { createHash } from "crypto";
 import { App, TFile, TFolder } from "obsidian";
 import type { VaultFileRecord, VaultFileType } from "sync/types";
 
@@ -169,11 +168,11 @@ export function normalizeTextContent(content: string) {
 }
 
 export function createTextContentHash(content: string) {
-	return createMd5Hash(Buffer.from(normalizeTextContent(content), "utf8"));
+	return createContentHash(new TextEncoder().encode(normalizeTextContent(content)).buffer);
 }
 
 export function createBinaryContentHash(content: ArrayBuffer) {
-	return createMd5Hash(Buffer.from(content));
+	return createContentHash(content);
 }
 
 function normalizeVaultFolder(folder: string) {
@@ -187,7 +186,7 @@ async function readVaultFileContent(app: App, file: TFile, fileType: VaultFileTy
 
 		return {
 			textContent,
-			contentHash: createTextContentHash(textContent)
+			contentHash: await createTextContentHash(textContent)
 		};
 	}
 
@@ -195,12 +194,13 @@ async function readVaultFileContent(app: App, file: TFile, fileType: VaultFileTy
 
 	return {
 		binaryContent,
-		contentHash: createBinaryContentHash(binaryContent)
+		contentHash: await createBinaryContentHash(binaryContent)
 	};
 }
 
-function createMd5Hash(content: Buffer) {
-	return createHash("md5").update(content).digest("hex");
+async function createContentHash(content: ArrayBuffer) {
+	const hashBuffer = await crypto.subtle.digest("SHA-256", content);
+	return Array.from(new Uint8Array(hashBuffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function getVaultFileType(

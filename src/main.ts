@@ -5,8 +5,19 @@ import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/
 import { formatDateTime } from "utils/date-format";
 import { Logger } from "utils/logger";
 
-const logger = new Logger("MySyncPlugin");
+// const logger = new Logger("MySyncPlugin");
 const IDLE_STATUS_DELAY_MS = 5000;
+const STRING_SETTING_KEYS = [
+	"localVaultId",
+	"customSyncFolder",
+	"couchDbUrl",
+	"couchDbDatabase",
+	"couchDbUsername",
+	"couchDbPassword",
+	"lastSyncNowAt",
+	"lastPushToCouchDbAt",
+	"lastPullFromCouchDbAt"
+] as const;
 
 interface SyncStatusView {
 	text: string;
@@ -114,7 +125,8 @@ export default class MySyncPlugin extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		const savedSettings = normalizeSavedSettings((await this.loadData()) as unknown);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
 
 		if (!this.settings.localVaultId) {
 			this.settings.localVaultId = createLocalVaultId();
@@ -182,6 +194,40 @@ function createLocalVaultId() {
 
 function createLocalDatabaseName(localVaultId: string) {
 	return `mysync-files-${localVaultId}`;
+}
+
+function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
+	if (!isRecord(data)) {
+		return {};
+	}
+
+	const settings: Partial<MySyncSettings> = {};
+
+	for (const key of STRING_SETTING_KEYS) {
+		const value = data[key];
+
+		if (typeof value === "string") {
+			settings[key] = value;
+		}
+	}
+
+	if (isSyncFolderMode(data.syncFolderMode)) {
+		settings.syncFolderMode = data.syncFolderMode;
+	}
+
+	if (typeof data.syncOnStartup === "boolean") {
+		settings.syncOnStartup = data.syncOnStartup;
+	}
+
+	return settings;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isSyncFolderMode(value: unknown): value is MySyncSettings["syncFolderMode"] {
+	return value === "vault-root" || value === "custom";
 }
 
 function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): SyncStatusView {
