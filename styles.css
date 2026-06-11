@@ -6,13 +6,6 @@
 	margin-top: 1.5em;
 }
 
-.mysync-settings-heading {
-	margin: 0 0 0.5em;
-	font-size: var(--font-ui-medium);
-	font-weight: var(--font-semibold);
-	color: var(--text-normal);
-}
-
 .mysync-readonly-setting {
 	color: var(--text-muted);
 	background-color: var(--background-secondary);

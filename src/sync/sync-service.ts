@@ -340,7 +340,7 @@ export class SyncService {
 			return "conflict";
 		}
 
-		await this.app.vault.delete(existingFile);
+		await this.app.fileManager.trashFile(existingFile);
 		await this.store.deleteFileRecordById(recordId);
 		return "deleted";
 	}

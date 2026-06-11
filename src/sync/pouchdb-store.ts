@@ -112,10 +112,10 @@ export class PouchDbFileStore {
 						onProgress(docsWritten);
 					})
 					.on("denied", (error) => {
-						reject(error);
+						reject(toError(error));
 					})
 					.on("error", (error) => {
-						reject(error);
+						reject(toError(error));
 					})
 					.on("complete", (result) => {
 						resolve({
@@ -140,10 +140,10 @@ export class PouchDbFileStore {
 						onProgress(docsRead);
 					})
 					.on("denied", (error) => {
-						reject(error);
+						reject(toError(error));
 					})
 					.on("error", (error) => {
-						reject(error);
+						reject(toError(error));
 					})
 					.on("complete", (result) => {
 						resolve({
@@ -285,6 +285,18 @@ function createRemoteOptions(connection: CouchDbConnection): PouchDB.Replication
 
 function isDatabaseInfoError(info: PouchDB.DatabaseInfo): info is PouchDB.DatabaseInfo & { error: string } {
 	return typeof info.error === "string" && info.error.length > 0;
+}
+
+function toError(reason: unknown): Error {
+	if (reason instanceof Error) {
+		return reason;
+	}
+
+	if (typeof reason === "string") {
+		return new Error(reason);
+	}
+
+	return new Error(`PouchDB replication failed: ${JSON.stringify(reason)}`);
 }
 
 function formatDatabaseInfoError(info: PouchDB.DatabaseInfo & { error: string }) {

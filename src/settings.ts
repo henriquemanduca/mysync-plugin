@@ -1,4 +1,5 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
+import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type MySyncPlugin from "main";
 import { formatDateTime } from "utils/date-format";
 
@@ -36,26 +37,214 @@ function isSyncFolderMode(value: string): value is SyncFolderMode {
 	return value === "vault-root" || value === "custom";
 }
 
+function supportsDeclarativeSettings() {
+	return typeof (PluginSettingTab.prototype as { getSettingDefinitions?: unknown }).getSettingDefinitions === "function";
+}
+
 export class MySyncSettingTab extends PluginSettingTab {
 	plugin: MySyncPlugin;
 
 	constructor(app: App, plugin: MySyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+
+		if (!supportsDeclarativeSettings()) {
+			(this as unknown as { display: () => void }).display = () => this.renderLegacySettings();
+		}
 	}
 
-	private createSection(name: string): HTMLElement {
+	getSettingDefinitions(): SettingDefinitionItem[] {
+		return [
+			{
+				type: "group",
+				heading: "Local configuration",
+				cls: "mysync-settings-section",
+				items: [
+					{
+						name: "Local vault ID",
+						desc: "Automatically generated identifier for this vault.",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.readOnly = true;
+								text.inputEl.addClass("mysync-readonly-setting");
+								text.setValue(`mysync-files-${this.plugin.settings.localVaultId}`);
+							});
+						}
+					},
+					{
+						name: "Folder source",
+						desc: `Choose what folder to sync. Current vault: ${this.app.vault.getName()}.`,
+						control: {
+							type: "dropdown",
+							key: "syncFolderMode",
+							options: {
+								"vault-root": "Use Obsidian vault root",
+								custom: "Set a custom folder"
+							}
+						}
+					},
+					{
+						name: "Custom sync folder",
+						desc: "Folder path inside the vault to sync when custom folder mode is selected.",
+						control: {
+							type: "text",
+							key: "customSyncFolder",
+							placeholder: "Projects/MySync",
+							disabled: () => this.plugin.settings.syncFolderMode !== "custom"
+						}
+					},
+					{
+						name: "Sync on startup",
+						desc: "Run a sync when Obsidian loads the plugin.",
+						control: {
+							type: "toggle",
+							key: "syncOnStartup"
+						}
+					},
+					this.createReadonlyDateSetting(
+						"Last sync now",
+						"Last successful local sync execution.",
+						"lastSyncNowAt"
+					),
+					this.createReadonlyDateSetting(
+						"Last push to CouchDB",
+						"Last successful remote push execution.",
+						"lastPushToCouchDbAt"
+					),
+					this.createReadonlyDateSetting(
+						"Last pull from CouchDB",
+						"Last successful remote pull execution.",
+						"lastPullFromCouchDbAt"
+					)
+				]
+			},
+			{
+				type: "group",
+				heading: "Remote database",
+				cls: "mysync-settings-section",
+				items: [
+					{
+						name: "CouchDB URL",
+						desc: "Base URL for the CouchDB server.",
+						control: {
+							type: "text",
+							key: "couchDbUrl",
+							placeholder: "https://couchdb.example.com"
+						}
+					},
+					{
+						name: "CouchDB database",
+						desc: "Database name used for remote sync.",
+						control: {
+							type: "text",
+							key: "couchDbDatabase",
+							placeholder: "mysync"
+						}
+					},
+					{
+						name: "CouchDB username",
+						desc: "Username for CouchDB basic authentication.",
+						control: {
+							type: "text",
+							key: "couchDbUsername",
+							placeholder: "username"
+						}
+					},
+					{
+						name: "CouchDB password",
+						desc: "Password for CouchDB basic authentication.",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.type = "password";
+								text
+									.setPlaceholder("Password")
+									.setValue(this.plugin.settings.couchDbPassword)
+									.onChange(async (value) => {
+										this.plugin.settings.couchDbPassword = value;
+										await this.plugin.saveSettings();
+									});
+							});
+						}
+					}
+				]
+			}
+		];
+	}
+
+	getControlValue(key: string): unknown {
+		return this.plugin.settings[key as keyof MySyncSettings];
+	}
+
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		switch (key) {
+			case "syncFolderMode":
+				const syncFolderMode = String(value);
+
+				if (!isSyncFolderMode(syncFolderMode)) {
+					return;
+				}
+
+				this.plugin.settings.syncFolderMode = syncFolderMode;
+				await this.plugin.saveSettings();
+				this.refreshDomState();
+				return;
+			case "customSyncFolder":
+				this.plugin.settings.customSyncFolder = String(value).trim();
+				break;
+			case "couchDbUrl":
+				this.plugin.settings.couchDbUrl = String(value).trim().replace(/\/+$/g, "");
+				break;
+			case "couchDbDatabase":
+				this.plugin.settings.couchDbDatabase = String(value).trim();
+				break;
+			case "couchDbUsername":
+				this.plugin.settings.couchDbUsername = String(value).trim();
+				break;
+			case "syncOnStartup":
+				this.plugin.settings.syncOnStartup = Boolean(value);
+				break;
+			default:
+				return;
+		}
+
+		await this.plugin.saveSettings();
+	}
+
+	private createReadonlyDateSetting(
+		name: string,
+		desc: string,
+		key: "lastSyncNowAt" | "lastPushToCouchDbAt" | "lastPullFromCouchDbAt"
+	): SettingGroupItem {
+		return {
+			name,
+			desc,
+			render: (setting) => {
+				const value = this.plugin.settings[key];
+
+				setting.addText((text) => {
+					text.inputEl.readOnly = true;
+					text.inputEl.addClass("mysync-readonly-setting");
+					text.setValue(formatDateTime(value, {
+						fallback: "Never",
+						invalidFallback: value
+					}));
+				});
+			}
+		};
+	}
+
+	private createLegacySection(name: string): HTMLElement {
 		const sectionEl = this.containerEl.createDiv({ cls: "mysync-settings-section" });
 		sectionEl.createEl("h3", { text: name, cls: "mysync-settings-heading" });
 		return sectionEl;
 	}
 
-	display(): void {
+	private renderLegacySettings(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		const localSectionEl = this.createSection("Local configuration");
-		const remoteSectionEl = this.createSection("Remote database");
+		const localSectionEl = this.createLegacySection("Local configuration");
+		const remoteSectionEl = this.createLegacySection("Remote database");
 
 		new Setting(localSectionEl)
 			.setName("Local vault ID")
@@ -81,7 +270,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 						this.plugin.settings.syncFolderMode = value;
 						await this.plugin.saveSettings();
-						this.display();
+						this.renderLegacySettings();
 					})
 			);
 
@@ -111,41 +300,24 @@ export class MySyncSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(localSectionEl)
-			.setName("Last sync now")
-			.setDesc("Last successful local sync execution.")
-			.addText((text) => {
-				text.inputEl.readOnly = true;
-				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatDateTime(this.plugin.settings.lastSyncNowAt, {
-					fallback: "Never",
-					invalidFallback: this.plugin.settings.lastSyncNowAt
-				}));
-			});
-
-		new Setting(localSectionEl)
-			.setName("Last push to CouchDB")
-			.setDesc("Last successful remote push execution.")
-			.addText((text) => {
-				text.inputEl.readOnly = true;
-				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatDateTime(this.plugin.settings.lastPushToCouchDbAt, {
-					fallback: "Never",
-					invalidFallback: this.plugin.settings.lastPushToCouchDbAt
-				}));
-			});
-
-		new Setting(localSectionEl)
-			.setName("Last pull from CouchDB")
-			.setDesc("Last successful remote pull execution.")
-			.addText((text) => {
-				text.inputEl.readOnly = true;
-				text.inputEl.addClass("mysync-readonly-setting");
-				text.setValue(formatDateTime(this.plugin.settings.lastPullFromCouchDbAt, {
-					fallback: "Never",
-					invalidFallback: this.plugin.settings.lastPullFromCouchDbAt
-				}));
-			});
+		this.addReadonlyLegacyDateSetting(
+			localSectionEl,
+			"Last sync now",
+			"Last successful local sync execution.",
+			this.plugin.settings.lastSyncNowAt
+		);
+		this.addReadonlyLegacyDateSetting(
+			localSectionEl,
+			"Last push to CouchDB",
+			"Last successful remote push execution.",
+			this.plugin.settings.lastPushToCouchDbAt
+		);
+		this.addReadonlyLegacyDateSetting(
+			localSectionEl,
+			"Last pull from CouchDB",
+			"Last successful remote pull execution.",
+			this.plugin.settings.lastPullFromCouchDbAt
+		);
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")
@@ -198,6 +370,25 @@ export class MySyncSettingTab extends PluginSettingTab {
 						this.plugin.settings.couchDbPassword = value;
 						await this.plugin.saveSettings();
 					});
+			});
+	}
+
+	private addReadonlyLegacyDateSetting(
+		containerEl: HTMLElement,
+		name: string,
+		desc: string,
+		value: string
+	): void {
+		new Setting(containerEl)
+			.setName(name)
+			.setDesc(desc)
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatDateTime(value, {
+					fallback: "Never",
+					invalidFallback: value
+				}));
 			});
 	}
 }

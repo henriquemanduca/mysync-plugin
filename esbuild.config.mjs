@@ -41,6 +41,10 @@ const context = await esbuild.context({
 	],
 	format: "cjs",
 	target: "es2018",
+	define: {
+		localStorage: "undefined",
+		sessionStorage: "undefined"
+	},
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,
