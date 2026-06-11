@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { App, TFile, TFolder } from "obsidian";
 import type { VaultFileRecord, VaultFileType } from "sync/types";
 
@@ -112,6 +113,7 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 	const imageMimeType = getImageMimeType(extension);
 	const mimeType = imageMimeType ?? getBinaryMimeType(extension);
 	const fileType = getVaultFileType(extension, imageMimeType, mimeType);
+	const fileContent = await readVaultFileContent(app, file, fileType);
 	const record: VaultFileRecord = {
 		_id: createFileRecordId(file.path),
 		type: "vault-file",
@@ -119,6 +121,7 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 		fileName: file.name,
 		path: file.path,
 		size: file.stat.size,
+		contentHash: fileContent.contentHash,
 		lastChanged: file.stat.mtime,
 		lastChangedIso: new Date(file.stat.mtime).toISOString()
 	};
@@ -128,14 +131,13 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 	}
 
 	if (fileType === "markdown") {
-		record.content = await app.vault.cachedRead(file);
+		record.content = fileContent.textContent;
 
-	} else if (mimeType) {
-		const data = await app.vault.readBinary(file);
+	} else if (mimeType && fileContent.binaryContent) {
 		record._attachments = {
 			[FILE_ATTACHMENT_ID]: {
 				content_type: mimeType,
-				data: new Blob([data], { type: mimeType })
+				data: new Blob([fileContent.binaryContent], { type: mimeType })
 			}
 		};
 	}
@@ -157,9 +159,48 @@ export function getPathFromFileRecordId(id: string) {
 	return id.slice(prefix.length);
 }
 
+export async function createLocalFileContentHash(app: App, file: TFile, fileType: VaultFileType) {
+	const fileContent = await readVaultFileContent(app, file, fileType);
+	return fileContent.contentHash;
+}
+
+export function normalizeTextContent(content: string) {
+	return content.replace(/\r\n?/g, "\n");
+}
+
+export function createTextContentHash(content: string) {
+	return createMd5Hash(Buffer.from(normalizeTextContent(content), "utf8"));
+}
+
+export function createBinaryContentHash(content: ArrayBuffer) {
+	return createMd5Hash(Buffer.from(content));
+}
+
 function normalizeVaultFolder(folder: string) {
 	const trimmed = folder.trim().replace(/^\/+|\/+$/g, "");
 	return trimmed || "/";
+}
+
+async function readVaultFileContent(app: App, file: TFile, fileType: VaultFileType) {
+	if (fileType === "markdown") {
+		const textContent = normalizeTextContent(await app.vault.cachedRead(file));
+
+		return {
+			textContent,
+			contentHash: createTextContentHash(textContent)
+		};
+	}
+
+	const binaryContent = await app.vault.readBinary(file);
+
+	return {
+		binaryContent,
+		contentHash: createBinaryContentHash(binaryContent)
+	};
+}
+
+function createMd5Hash(content: Buffer) {
+	return createHash("md5").update(content).digest("hex");
 }
 
 function getVaultFileType(

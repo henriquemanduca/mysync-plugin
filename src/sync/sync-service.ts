@@ -4,8 +4,11 @@ import type { PouchDbFileStore } from "sync/pouchdb-store";
 import type { VaultFileRecord } from "sync/types";
 import {
 	collectFilesInFolder,
+	createBinaryContentHash,
 	createFileRecord,
 	createFileRecordId,
+	createLocalFileContentHash,
+	createTextContentHash,
 	getPathFromFileRecordId,
 	getSyncFolder,
 	getSyncFolderState,
@@ -49,6 +52,8 @@ export type SyncStatus =
 	| { state: "tested"; databaseName: string; documentCount?: number }
 	| { state: "error"; message: string };
 
+export type CompletedSyncOperation = "syncNow" | "pushToCouchDb" | "pullFromCouchDb";
+
 const logger = new Logger("SyncService");
 
 export class SyncService {
@@ -61,13 +66,14 @@ export class SyncService {
 		private app: App,
 		private store: PouchDbFileStore,
 		private getSettings: () => MySyncSettings,
-		private onStatusChange: (status: SyncStatus) => void
+		private onStatusChange: (status: SyncStatus) => void,
+		private onOperationCompleted: (operation: CompletedSyncOperation) => Promise<void>
 	) {
 		this.onStatusChange({ state: "idle" });
 	}
 
 	isRunning(): boolean {
-		if (this.syncInProgress) new Notice("MySync is already running");
+		if (this.syncInProgress) new Notice("A sync process is already running.");
 		return this.syncInProgress;
 	}
 
@@ -85,7 +91,7 @@ export class SyncService {
 				saved: result.saved,
 				skipped: result.skipped
 			});
-			new Notice(`Read ${result.saved} vault files, skipped ${result.skipped} unchanged.`);
+			await this.onOperationCompleted("syncNow");
 		} catch (error) {
 			failed = true;
 			logger.error("Synchronization failed", error);
@@ -93,7 +99,7 @@ export class SyncService {
 				state: "error",
 				message: "synchronization failed"
 			});
-			new Notice(getErrorMessage(error, "synchronization failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "Synchronization failed. Check the console for details."));
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
@@ -122,16 +128,17 @@ export class SyncService {
 		this.syncInProgress = true;
 		let failed = false;
 
-		const notice = new Notice("Start pushing", 0);
+		const notice = new Notice("Start pushing.", 0);
 		try {
-			const result = await this.syncLocalFiles();
+			// const result = await this.syncLocalFiles();
+			// this.onStatusChange({
+			// 	state: "done",
+			// 	total: result.total,
+			// 	saved: result.saved,
+			// 	skipped: result.skipped
+			// });
 
-			this.onStatusChange({
-				state: "done",
-				total: result.total,
-				saved: result.saved,
-				skipped: result.skipped
-			});
+			await this.syncLocalFiles();
 
 			const pushResult = await this.store.pushToCouchDb(
 				{
@@ -152,8 +159,9 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+			await this.onOperationCompleted("pushToCouchDb");
 
-			new Notice(`Pushed ${pushResult.docsWritten} document(s)`);
+			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
 		} catch (error) {
 			notice.hide()
 			failed = true;
@@ -162,7 +170,7 @@ export class SyncService {
 				state: "error",
 				message: "Push failed"
 			});
-			new Notice(getErrorMessage(error, "Push failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "Push failed. Check the console for details."));
 		} finally {
 			notice.hide()
 
@@ -191,11 +199,13 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-		const notice = new Notice("Start pulling", 0);
+		const notice = new Notice("Start pulling.", 0);
 
 		try {
 			const localRecordsBeforePull = await this.store.listFileRecords();
-			const localRecordsById = new Map(localRecordsBeforePull.map((record) => [record._id, record]));
+			const localRecordsById = new Map(localRecordsBeforePull.map(
+				(record) => [record._id, record])
+			);
 			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
 
 			const pullResult = await this.store.pullFromCouchDb(
@@ -213,10 +223,12 @@ export class SyncService {
 				}
 			);
 
-			const deletionCandidateIds = Array.from(new Set([
-				...localRecordsById.keys(),
-				...localVaultRecordIds
-			]));
+			const deletionCandidateIds = Array.from(
+				new Set([
+					...localRecordsById.keys(),
+					...localVaultRecordIds
+				])
+			);
 
 			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
@@ -232,9 +244,10 @@ export class SyncService {
 				skipped,
 				conflicts
 			});
+			await this.onOperationCompleted("pullFromCouchDb");
 
 			new Notice(
-				`Pulled ${pullResult.docsRead} documents. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
+				`Read ${pullResult.docsRead}. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
 			);
 		} catch (error) {
 			logger.error("CouchDB pull failed", error);
@@ -242,7 +255,7 @@ export class SyncService {
 				state: "error",
 				message: "CouchDB pull failed"
 			});
-			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details"));
+			new Notice(getErrorMessage(error, "CouchDB pull failed. Check the console for details."));
 		} finally {
 			notice.hide();
 			this.syncInProgress = false;
@@ -333,24 +346,12 @@ export class SyncService {
 	}
 
 	private async localFileMatchesRecord(file: TFile, record: VaultFileRecord) {
-		if (record.fileType === "markdown" && typeof record.content === "string") {
-			const localContent = await this.app.vault.read(file);
-			return localContent === record.content;
-		}
+		const [localHash, recordHash] = await Promise.all([
+			createLocalFileContentHash(this.app, file, record.fileType),
+			getRecordContentHash(record)
+		]);
 
-		const recordData = await getAttachmentArrayBuffer(record);
-
-		if (recordData) {
-			const localData = await this.app.vault.readBinary(file);
-			const [recordHash, localHash] = await Promise.all([
-				bufferHash(recordData),
-				bufferHash(localData)
-			]);
-
-			return recordHash === localHash;
-		}
-
-		return file.stat.size === record.size && file.stat.mtime === record.lastChanged;
+		return localHash === recordHash;
 	}
 
 	async testCouchDbConnection() {
@@ -497,7 +498,7 @@ export class SyncService {
 
 		const existingFile = this.app.vault.getAbstractFileByPath(path);
 		if (existingFile instanceof TFile) {
-			if (record.lastChanged <= existingFile.stat.mtime) {
+			if (await this.localFileMatchesRecord(existingFile, record)) {
 				return "skipped";
 			}
 
@@ -519,15 +520,6 @@ export class SyncService {
 		if (!fileTypeIstext) {
 			const data = await getAttachmentArrayBuffer(record);
 			if (!data) return "skipped";
-
-			if (existingFile instanceof TFile) {
-				const localData = await this.app.vault.readBinary(existingFile);
-				const [remoteHash, localHash] = await Promise.all([
-					bufferHash(data),
-					bufferHash(localData)
-				]);
-				if (remoteHash === localHash) return "skipped";
-			}
 
 			await this.app.vault.createBinary(path, data);
 			return "restored";
@@ -732,13 +724,8 @@ export class SyncService {
 	}
 
 	private async syncFileIfChanged(file: TFile) {
-		if (!(await this.store.hasFileChanged(file))) {
-			return false;
-		}
-
 		const record = await createFileRecord(this.app, file);
-		await this.store.saveFileRecord(record);
-		return true;
+		return this.store.saveFileRecordIfChanged(record);
 	}
 }
 
@@ -806,10 +793,19 @@ async function getAttachmentArrayBuffer(record: VaultFileRecord) {
 	return null;
 }
 
-async function bufferHash(buffer: ArrayBuffer): Promise<string> {
-	const digest = await crypto.subtle.digest('MD5', buffer);
-	// Cast ArrayBuffer → Uint8Array → hex string
-	return Array.from(new Uint8Array(digest))
-		.map(b => b.toString(16).padStart(2, '0'))
-		.join('');
+async function getRecordContentHash(record: VaultFileRecord) {
+	if (record.contentHash) {
+		return record.contentHash;
+	}
+
+	if (record.fileType === "markdown" && typeof record.content === "string") {
+		return createTextContentHash(record.content);
+	}
+
+	const data = await getAttachmentArrayBuffer(record);
+	if (data) {
+		return createBinaryContentHash(data);
+	}
+
+	return null;
 }

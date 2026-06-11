@@ -8,6 +8,7 @@ export interface VaultFileRecord {
 	path: string;
 	mimeType?: string;
 	size: number;
+	contentHash: string;
 	content?: string;
 	_attachments?: Record<string, VaultFileAttachment>;
 	lastChanged: number;

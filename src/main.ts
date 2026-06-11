@@ -1,11 +1,18 @@
 import { Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "settings";
 import { PouchDbFileStore } from "sync/pouchdb-store";
-import { SyncService, type SyncStatus } from "sync/sync-service";
-import { Logger } from 'utils/logger';
+import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/sync-service";
+import { formatDateTime } from "utils/date-format";
+import { Logger } from "utils/logger";
 
 const logger = new Logger("MySyncPlugin");
 const IDLE_STATUS_DELAY_MS = 5000;
+
+interface SyncStatusView {
+	text: string;
+	title: string;
+	returnToIdle?: boolean;
+}
 
 export default class MySyncPlugin extends Plugin {
 	settings!: MySyncSettings;
@@ -14,15 +21,19 @@ export default class MySyncPlugin extends Plugin {
 	private idleStatusTimer: number | null = null;
 
 	async onload() {
+		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
 		await this.loadSettings();
-		logger.method('onload', { settings: this.settings });
 
 		this.statusBarEl = this.addStatusBarItem();
 		this.updateSyncStatus({ state: "idle" });
 
 		const fileStore = new PouchDbFileStore(createLocalDatabaseName(this.settings.localVaultId));
-		this.syncService = new SyncService(this.app, fileStore, () => this.settings, (status) =>
-			this.updateSyncStatus(status)
+		this.syncService = new SyncService(
+			this.app,
+			fileStore,
+			() => this.settings,
+			(status) => this.updateSyncStatus(status),
+			(operation) => this.saveCompletedSyncOperation(operation)
 		);
 
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
@@ -98,6 +109,7 @@ export default class MySyncPlugin extends Plugin {
 	onunload() {
 		this.clearIdleStatusTimer();
 		this.syncService.close();
+		void Logger.flush();
 		// Obsidian automatically disposes registered events, commands, and intervals.
 	}
 
@@ -114,90 +126,32 @@ export default class MySyncPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
+	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
+		const completedAt = new Date().toISOString();
+
+		if (operation === "syncNow") {
+			this.settings.lastSyncNowAt = completedAt;
+		} else if (operation === "pushToCouchDb") {
+			this.settings.lastPushToCouchDbAt = completedAt;
+		} else {
+			this.settings.lastPullFromCouchDbAt = completedAt;
+		}
+
+		await this.saveSettings();
+	}
+
 	private updateSyncStatus(status: SyncStatus) {
 		this.clearIdleStatusTimer();
 		this.statusBarEl.empty();
 		this.statusBarEl.addClass("mysync-status");
 
-		if (status.state === "idle") {
-			this.statusBarEl.setText("idle");
-			this.statusBarEl.title = "MySync is idle";
-			return;
-		}
+		const view = createSyncStatusView(status, this.settings);
+		this.statusBarEl.setText(view.text);
+		this.statusBarEl.title = view.title;
 
-		if (status.state === "queued") {
-			this.statusBarEl.setText(`queued ${status.pending}`);
-			this.statusBarEl.title = `${status.pending} file(s) queued for sync`;
-			return;
-		}
-
-		if (status.state === "syncing") {
-			this.statusBarEl.setText(`${status.current}/${status.total}`);
-			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
-			return;
-		}
-
-		if (status.state === "done") {
-			this.statusBarEl.setText("done");
-			this.statusBarEl.title = `Saved ${status.saved}, skipped ${status.skipped}`;
+		if (view.returnToIdle) {
 			this.scheduleIdleStatus();
-			return;
 		}
-
-		if (status.state === "pushing") {
-			this.statusBarEl.setText(`pushing ${status.docsWritten}`);
-			this.statusBarEl.title = "Pushing to remote";
-			return;
-		}
-
-		if (status.state === "pushed") {
-			this.statusBarEl.setText(`pushed ${status.docsWritten}`);
-			this.statusBarEl.title = "Push complete";
-			this.scheduleIdleStatus();
-			return;
-		}
-
-		if (status.state === "pulling") {
-			this.statusBarEl.setText(`pulling ${status.docsRead}`);
-			this.statusBarEl.title = "Pulling from CouchDB";
-			return;
-		}
-
-		if (status.state === "pulled") {
-			this.statusBarEl.setText(`restored ${status.restored}, deleted ${status.deleted}`);
-			this.statusBarEl.title = `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
-			this.scheduleIdleStatus();
-			return;
-		}
-
-		if (status.state === "deleting") {
-			this.statusBarEl.setText(`delete ${status.current}/${status.total}`);
-			this.statusBarEl.title = `Applying remote deletions. Deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
-			return;
-		}
-
-		if (status.state === "restoring") {
-			this.statusBarEl.setText(`restore ${status.current}, skipped ${status.skipped}`);
-			this.statusBarEl.title = `Restoring files. Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`;
-			return;
-		}
-
-		if (status.state === "testing") {
-			this.statusBarEl.setText("testing");
-			this.statusBarEl.title = "Testing remote connection";
-			return;
-		}
-
-		if (status.state === "tested") {
-			this.statusBarEl.setText("tested");
-			this.statusBarEl.title = `Connected to ${status.databaseName}`;
-			this.scheduleIdleStatus();
-			return;
-		}
-
-		this.statusBarEl.setText("MySync error");
-		this.statusBarEl.title = status.message;
-		this.scheduleIdleStatus();
 	}
 
 	private scheduleIdleStatus() {
@@ -215,6 +169,10 @@ export default class MySyncPlugin extends Plugin {
 		window.clearTimeout(this.idleStatusTimer);
 		this.idleStatusTimer = null;
 	}
+
+	private getPluginDir() {
+		return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+	}
 }
 
 function createLocalVaultId() {
@@ -224,4 +182,116 @@ function createLocalVaultId() {
 
 function createLocalDatabaseName(localVaultId: string) {
 	return `mysync-files-${localVaultId}`;
+}
+
+function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): SyncStatusView {
+	switch (status.state) {
+		case "idle": {
+			const lastPushAt = formatDateTime(settings.lastPushToCouchDbAt, { includeTime: true });
+
+			return {
+				text: lastPushAt ? lastPushAt : "...",
+				title: "MySync last push"
+			};
+		}
+
+		case "queued":
+			return {
+				text: `queued ${status.pending}`,
+				title: `${status.pending} file(s) queued for sync`
+			};
+
+		case "syncing": {
+			const percent = calculatePercent(status.current, status.total);
+
+			return {
+				text: `preparing ${percent}%`,
+				title: `Saved ${status.saved}, skipped ${status.skipped}`
+			};
+		}
+
+		case "done": {
+			const text = `Saved ${status.saved}, skipped ${status.skipped}`;
+
+			return {
+				text,
+				title: text,
+				returnToIdle: true
+			};
+		}
+
+		case "pushing":
+			return {
+				text: `pushing ${status.docsWritten}`,
+				title: "Pushing to remote"
+			};
+
+		case "pushed":
+			return {
+				text: `pushed ${status.docsWritten}`,
+				title: "Push complete",
+				returnToIdle: true
+			};
+
+		case "pulling":
+			return {
+				text: `reading ${status.docsRead}`,
+				title: "Pulling from remote"
+			};
+
+		case "pulled":
+			return {
+				text: `restored ${status.restored}, deleted ${status.deleted}`,
+				title: `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`,
+				returnToIdle: true
+			};
+
+		case "deleting":
+			return {
+				text: `delete ${status.current}/${status.total}`,
+				title: `Deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`
+			};
+
+		case "restoring": {
+			const percent = calculatePercent(status.current, status.total);
+
+			return {
+				text: `restoring ${percent}%`,
+				title: `Restored ${status.restored}, skipped ${status.skipped}, conflicts ${status.conflicts}`
+			};
+		}
+
+		case "testing":
+			return {
+				text: "testing",
+				title: "Testing remote connection"
+			};
+
+		case "tested":
+			return {
+				text: "tested",
+				title: `Connected to ${status.databaseName}`,
+				returnToIdle: true
+			};
+
+		case "error":
+			return {
+				text: "MySync error",
+				title: status.message,
+				returnToIdle: true
+			};
+
+		default:
+			return assertNever(status);
+	}
+}
+
+function calculatePercent(current: number, total: number) {
+	return total > 0
+		? Math.round((current / total) * 100)
+		: 0;
+}
+
+function assertNever(value: never): never {
+	throw new Error(`Unhandled sync status: ${JSON.stringify(value)}`);
 }

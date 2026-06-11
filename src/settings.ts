@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type MySyncPlugin from "main";
+import { formatDateTime } from "utils/date-format";
 
 export type SyncFolderMode = "vault-root" | "custom";
 
@@ -12,6 +13,9 @@ export interface MySyncSettings {
 	couchDbUsername: string;
 	couchDbPassword: string;
 	syncOnStartup: boolean;
+	lastSyncNowAt: string;
+	lastPushToCouchDbAt: string;
+	lastPullFromCouchDbAt: string;
 }
 
 export const DEFAULT_SETTINGS: MySyncSettings = {
@@ -22,7 +26,10 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	couchDbDatabase: "mysync",
 	couchDbUsername: "",
 	couchDbPassword: "",
-	syncOnStartup: false
+	syncOnStartup: false,
+	lastSyncNowAt: "",
+	lastPushToCouchDbAt: "",
+	lastPullFromCouchDbAt: ""
 };
 
 function isSyncFolderMode(value: string): value is SyncFolderMode {
@@ -103,6 +110,42 @@ export class MySyncSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(localSectionEl)
+			.setName("Last sync now")
+			.setDesc("Last successful local sync execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatDateTime(this.plugin.settings.lastSyncNowAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastSyncNowAt
+				}));
+			});
+
+		new Setting(localSectionEl)
+			.setName("Last push to CouchDB")
+			.setDesc("Last successful remote push execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatDateTime(this.plugin.settings.lastPushToCouchDbAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastPushToCouchDbAt
+				}));
+			});
+
+		new Setting(localSectionEl)
+			.setName("Last pull from CouchDB")
+			.setDesc("Last successful remote pull execution.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(formatDateTime(this.plugin.settings.lastPullFromCouchDbAt, {
+					fallback: "Never",
+					invalidFallback: this.plugin.settings.lastPullFromCouchDbAt
+				}));
+			});
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")

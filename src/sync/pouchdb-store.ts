@@ -1,9 +1,8 @@
-import type { TFile } from "obsidian";
 import PouchDB from "pouchdb";
 import type { VaultFileRecord } from "sync/types";
 import { createFileRecordId } from "sync/vault-files";
 import { Logger } from 'utils/logger';
-import { isPouchConflict, isPouchNotFound } from "utils/pouchdb-errors";
+import { isPouchNotFound } from "utils/pouchdb-errors";
 
 export interface CouchDbConnection {
 	url: string;
@@ -39,13 +38,23 @@ export class PouchDbFileStore {
 		this.fileDb = new PouchDB<VaultFileRecord>(localDatabaseName);
 	}
 
-	async hasFileChanged(file: TFile) {
+	async saveFileRecordIfChanged(record: VaultFileRecord) {
 		return this.runWithLocalDb(async (fileDb) => {
 			try {
-				const existing = await fileDb.get(createFileRecordId(file.path));
-				return existing.lastChanged !== file.stat.mtime;
+				const existing = await fileDb.get(record._id);
+
+				if (existing.contentHash === record.contentHash) {
+					return false;
+				}
+
+				await fileDb.put({
+					...record,
+					_rev: existing._rev
+				});
+				return true;
 			} catch (error) {
 				if (isPouchNotFound(error)) {
+					await fileDb.put(record);
 					return true;
 				}
 
@@ -54,23 +63,23 @@ export class PouchDbFileStore {
 		});
 	}
 
-	async saveFileRecord(record: VaultFileRecord) {
-		return this.runWithLocalDb(async (fileDb) => {
-			try {
-				await fileDb.put(record);
-			} catch (error) {
-				if (!isPouchConflict(error)) {
-					throw error;
-				}
-
-				const existing = await fileDb.get(record._id);
-				await fileDb.put({
-					...record,
-					_rev: existing._rev
-				});
-			}
-		});
-	}
+	// async saveFileRecord(record: VaultFileRecord) {
+	// 	return this.runWithLocalDb(async (fileDb) => {
+	// 		try {
+	// 			await fileDb.put(record);
+	// 		} catch (error) {
+	// 			if (!isPouchConflict(error)) {
+	// 				throw error;
+	// 			}
+	//
+	// 			const existing = await fileDb.get(record._id);
+	// 			await fileDb.put({
+	// 				...record,
+	// 				_rev: existing._rev
+	// 			});
+	// 		}
+	// 	});
+	// }
 
 	async deleteFileRecordByPath(path: string) {
 		await this.deleteFileRecordById(createFileRecordId(path));
@@ -153,7 +162,9 @@ export class PouchDbFileStore {
 				binary: true
 			});
 
-			return result.rows.flatMap((row) => (row.doc ? [row.doc] : []));
+			return result.rows.flatMap(
+				(row) => (row.doc ? [row.doc] : [])
+			);
 		});
 	}
 
