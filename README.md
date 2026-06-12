@@ -170,7 +170,8 @@ npm version patch
 ```
 
 You can also use `minor` or `major`. The version hook updates
-`manifest.json` and `versions.json`.
+`manifest.json` and `versions.json`. Release tags are generated without a
+`v` prefix so they match the manifest version.
 
 ## License
 

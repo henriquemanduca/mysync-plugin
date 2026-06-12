@@ -10,6 +10,8 @@ jobs:
         runs-on: ubuntu-latest
         permissions:
             contents: write
+            id-token: write
+            attestations: write
 
         steps:
             - name: Checkout repository
@@ -72,6 +74,15 @@ jobs:
                   
                   cd release-package
                   zip -r "../mysync-${TAG}.zip" .
+
+            - name: Generate artifact attestations
+              uses: actions/attest@v4
+              with:
+                  subject-path: |
+                      dist/main.js
+                      dist/manifest.json
+                      dist/styles.css
+                      mysync-${{ github.ref_name }}.zip
 
             - name: Create GitHub release
               env:
