@@ -182,7 +182,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 	async setControlValue(key: string, value: unknown): Promise<void> {
 		switch (key) {
-			case "syncFolderMode":
+			case "syncFolderMode": {
 				const syncFolderMode = String(value);
 
 				if (!isSyncFolderMode(syncFolderMode)) {
@@ -193,6 +193,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 				await this.plugin.saveSettings();
 				refreshDomStateIfAvailable(this);
 				return;
+			}
 			case "customSyncFolder":
 				this.plugin.settings.customSyncFolder = String(value).trim();
 				break;
