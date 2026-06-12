@@ -188,8 +188,21 @@ export default class MySyncPlugin extends Plugin {
 }
 
 function createLocalVaultId() {
-	return crypto.randomUUID().split("-")[0] ||
-		`${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+	if (typeof crypto.randomUUID === "function") {
+		const [shortId] = crypto.randomUUID().split("-");
+		if (shortId) {
+			return shortId;
+		}
+	}
+
+	const randomPart = typeof crypto.getRandomValues === "function"
+		? Array.from(
+			crypto.getRandomValues(new Uint8Array(4)),
+			(byte) => byte.toString(16).padStart(2, "0")
+		).join("")
+		: Math.random().toString(36).slice(2, 10);
+
+	return `${Date.now().toString(36)}-${randomPart}`;
 }
 
 function createLocalDatabaseName(localVaultId: string) {

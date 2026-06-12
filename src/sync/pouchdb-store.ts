@@ -1,4 +1,4 @@
-import PouchDB from "pouchdb";
+import PouchDB from "pouchdb/dist/pouchdb";
 import type { VaultFileRecord } from "sync/types";
 import { createFileRecordId } from "sync/vault-files";
 import { Logger } from 'utils/logger';
@@ -62,24 +62,6 @@ export class PouchDbFileStore {
 			}
 		});
 	}
-
-	// async saveFileRecord(record: VaultFileRecord) {
-	// 	return this.runWithLocalDb(async (fileDb) => {
-	// 		try {
-	// 			await fileDb.put(record);
-	// 		} catch (error) {
-	// 			if (!isPouchConflict(error)) {
-	// 				throw error;
-	// 			}
-	//
-	// 			const existing = await fileDb.get(record._id);
-	// 			await fileDb.put({
-	// 				...record,
-	// 				_rev: existing._rev
-	// 			});
-	// 		}
-	// 	});
-	// }
 
 	async deleteFileRecordByPath(path: string) {
 		await this.deleteFileRecordById(createFileRecordId(path));
