@@ -156,5 +156,8 @@ function isSensitiveKey(key: string) {
 	return normalizedKey.includes("password") ||
 		normalizedKey.includes("token") ||
 		normalizedKey.includes("secret") ||
-		normalizedKey.includes("credential");
+		normalizedKey.includes("credential") ||
+		normalizedKey === "authorization" ||
+		normalizedKey === "cookie" ||
+		normalizedKey === "set-cookie";
 }

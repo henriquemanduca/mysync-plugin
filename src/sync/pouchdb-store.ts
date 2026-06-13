@@ -1,7 +1,8 @@
+import { requestUrl } from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
 import type { VaultFileRecord } from "sync/types";
 import { createFileRecordId } from "sync/vault-files";
-import { Logger } from 'utils/logger';
+import { Logger } from "utils/logger";
 import { isPouchNotFound } from "utils/pouchdb-errors";
 
 export interface CouchDbConnection {
@@ -250,19 +251,19 @@ function createRemoteDatabaseUrl(url: string, database: string) {
 }
 
 function createRemoteOptions(connection: CouchDbConnection): PouchDB.ReplicationOptions {
-	if (!connection.username && !connection.password) {
-		return {
-			skip_setup: true
+	const options: PouchDB.ReplicationOptions = {
+		skip_setup: true,
+		fetch: createObsidianFetch()
+	};
+
+	if (connection.username || connection.password) {
+		options.auth = {
+			username: connection.username,
+			password: connection.password
 		};
 	}
 
-	return {
-		skip_setup: true,
-		auth: {
-			username: connection.username,
-			password: connection.password
-		}
-	};
+	return options;
 }
 
 function isDatabaseInfoError(info: PouchDB.DatabaseInfo): info is PouchDB.DatabaseInfo & { error: string } {
@@ -287,4 +288,69 @@ function formatDatabaseInfoError(info: PouchDB.DatabaseInfo & { error: string })
 	}
 
 	return `CouchDB connection failed: ${info.error}.`;
+}
+
+function createObsidianFetch() {
+	return async function obsidianFetch(
+		url: RequestInfo | URL,
+		init: RequestInit = {}
+	): Promise<Response> {
+		const method = (init.method ?? "GET").toUpperCase();
+		const headers = normalizeHeaders(init.headers);
+		const body = await normalizeRequestBody(init.body);
+
+		const requestUrlString = url.toString();
+
+		const result = await requestUrl({
+			url: requestUrlString,
+			method,
+			headers,
+			body,
+			throw: false
+		});
+
+		return new Response(result.arrayBuffer, {
+			status: result.status,
+			headers: result.headers
+		});
+	};
+}
+
+function normalizeHeaders(headersInit?: HeadersInit): Record<string, string> {
+	const headers: Record<string, string> = {};
+
+	if (!headersInit) {
+		return headers;
+	}
+
+	new Headers(headersInit).forEach((value, key) => {
+		headers[key] = value;
+	});
+
+	return headers;
+}
+
+async function normalizeRequestBody(body: BodyInit | null | undefined): Promise<string | ArrayBuffer | undefined> {
+	if (body == null) {
+		return undefined;
+	}
+
+	if (typeof body === "string" || body instanceof ArrayBuffer) {
+		return body;
+	}
+
+	if (body instanceof Blob) {
+		return body.arrayBuffer();
+	}
+
+	if (body instanceof URLSearchParams) {
+		return body.toString();
+	}
+
+	if (ArrayBuffer.isView(body)) {
+		const bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+		return new Uint8Array(bytes).buffer;
+	}
+
+	throw new Error("Unsupported request body type for Obsidian requestUrl");
 }

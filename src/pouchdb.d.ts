@@ -14,6 +14,7 @@ declare module "pouchdb" {
 			auth?: AuthOptions;
 			live?: boolean;
 			retry?: boolean;
+			fetch?: (url: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 			skip_setup?: boolean;
 		}
 
