@@ -21,6 +21,9 @@ export interface RemotePullResult {
 }
 
 const logger = new Logger("PouchDbFileStore");
+const VAULT_FILE_START_KEY = "vault-file:";
+const VAULT_FILE_END_KEY = "vault-file:\ufff0";
+const REMOTE_BASELINE_LOCAL_DOC_PREFIX = "_local/mysync-remote-baseline:";
 
 type OpenRevision<T extends { _id: string }> =
 	| { ok: (T & PouchDB.ExistingDocument) | (PouchDB.ExistingDocument & { _deleted: true }) }
@@ -29,6 +32,19 @@ type OpenRevision<T extends { _id: string }> =
 type PouchDbOpenRevisions<T extends { _id: string }> = PouchDB.Database<T> & {
 	get(id: string, options: { open_revs: "all" }): Promise<Array<OpenRevision<T>>>;
 };
+
+interface RemoteBaselineDocument {
+	_id: string;
+	_rev?: string;
+	type: "mysync-remote-baseline";
+	remoteKey: string;
+	savedAt: string;
+}
+
+interface LocalDocumentStore {
+	get(id: string): Promise<RemoteBaselineDocument & PouchDB.ExistingDocument>;
+	put(doc: RemoteBaselineDocument): Promise<unknown>;
+}
 
 export class PouchDbFileStore {
 	private fileDb: PouchDB<VaultFileRecord>;
@@ -109,6 +125,15 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async canPushToCouchDb(connection: CouchDbConnection) {
+		const [remoteHasFileRecords, hasLocalBaseline] = await Promise.all([
+			this.hasRemoteFileRecords(connection),
+			this.hasRemoteBaseline(connection)
+		]);
+
+		return !remoteHasFileRecords || hasLocalBaseline;
+	}
+
 	async pullFromCouchDb(connection: CouchDbConnection, onProgress: (docsRead: number) => void) {
 		return this.runWithLocalDb(async (fileDb) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
@@ -134,6 +159,69 @@ export class PouchDbFileStore {
 						});
 					});
 			});
+		});
+	}
+
+	async hasRemoteFileRecords(connection: CouchDbConnection) {
+		const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
+		const remoteDb = new PouchDB<VaultFileRecord>(remoteUrl, createRemoteOptions(connection));
+
+		try {
+			const result = await remoteDb.allDocs({
+				startkey: VAULT_FILE_START_KEY,
+				endkey: VAULT_FILE_END_KEY,
+				limit: 1
+			});
+
+			return result.rows.length > 0;
+		} finally {
+			await remoteDb.close();
+		}
+	}
+
+	async hasRemoteBaseline(connection: CouchDbConnection) {
+		return this.runWithLocalDb(async (fileDb) => {
+			const baselineId = await createRemoteBaselineLocalDocumentId(connection);
+
+			try {
+				await getLocalDocumentStore(fileDb).get(baselineId);
+				return true;
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					return false;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async markRemoteBaseline(connection: CouchDbConnection) {
+		return this.runWithLocalDb(async (fileDb) => {
+			const baselineId = await createRemoteBaselineLocalDocumentId(connection);
+			const remoteKey = createRemoteKey(connection);
+			const localDocs = getLocalDocumentStore(fileDb);
+			const baseline: RemoteBaselineDocument = {
+				_id: baselineId,
+				type: "mysync-remote-baseline",
+				remoteKey,
+				savedAt: new Date().toISOString()
+			};
+
+			try {
+				const existing = await localDocs.get(baselineId);
+				await localDocs.put({
+					...baseline,
+					_rev: existing._rev
+				});
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					await localDocs.put(baseline);
+					return;
+				}
+
+				throw error;
+			}
 		});
 	}
 
@@ -248,6 +336,23 @@ export class PouchDbFileStore {
 
 function createRemoteDatabaseUrl(url: string, database: string) {
 	return `${url.replace(/\/+$/g, "")}/${encodeURIComponent(database)}`;
+}
+
+function createRemoteKey(connection: CouchDbConnection) {
+	return `${connection.url.replace(/\/+$/g, "")}/${connection.database}`;
+}
+
+async function createRemoteBaselineLocalDocumentId(connection: CouchDbConnection) {
+	return `${REMOTE_BASELINE_LOCAL_DOC_PREFIX}${await createSha256Hex(createRemoteKey(connection))}`;
+}
+
+async function createSha256Hex(value: string) {
+	const hashBuffer = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+	return Array.from(new Uint8Array(hashBuffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function getLocalDocumentStore(fileDb: PouchDB<VaultFileRecord>) {
+	return fileDb as unknown as LocalDocumentStore;
 }
 
 function createRemoteOptions(connection: CouchDbConnection): PouchDB.ReplicationOptions {

@@ -47,6 +47,9 @@ declare module "pouchdb" {
 			attachments?: boolean;
 			binary?: boolean;
 			keys?: string[];
+			startkey?: string;
+			endkey?: string;
+			limit?: number;
 		}
 
 		interface AllDocsRow<T extends { _id: string }> {

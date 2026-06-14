@@ -1,6 +1,6 @@
 import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { MySyncSettings } from "settings";
-import type { PouchDbFileStore } from "sync/pouchdb-store";
+import type { CouchDbConnection, PouchDbFileStore } from "sync/pouchdb-store";
 import type { VaultFileRecord } from "sync/types";
 import {
 	collectFilesInFolder,
@@ -130,15 +130,23 @@ export class SyncService {
 
 		const notice = new Notice("Start pushing.", 0);
 		try {
+			const connection = createCouchDbConnection(settings);
+			const canPush = await this.store.canPushToCouchDb(connection);
+
+			if (!canPush) {
+				failed = true;
+				this.onStatusChange({
+					state: "error",
+					message: "Push blocked"
+				});
+				new Notice("Pull from remote before pushing to this non-empty database.");
+				return;
+			}
+
 			await this.syncLocalFiles();
 
 			const pushResult = await this.store.pushToCouchDb(
-				{
-					url: settings.couchDbUrl,
-					database: settings.couchDbDatabase,
-					username: settings.couchDbUsername,
-					password: settings.couchDbPassword
-				},
+				connection,
 				(docsWritten) => {
 					this.onStatusChange({
 						state: "pushing",
@@ -151,6 +159,7 @@ export class SyncService {
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+			await this.store.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pushToCouchDb");
 
 			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
@@ -194,6 +203,7 @@ export class SyncService {
 		const notice = new Notice("Start pulling.", 0);
 
 		try {
+			const connection = createCouchDbConnection(settings);
 			const localRecordsBeforePull = await this.store.listFileRecords();
 			const localRecordsById = new Map(localRecordsBeforePull.map(
 				(record) => [record._id, record])
@@ -201,12 +211,7 @@ export class SyncService {
 			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
 
 			const pullResult = await this.store.pullFromCouchDb(
-				{
-					url: settings.couchDbUrl,
-					database: settings.couchDbDatabase,
-					username: settings.couchDbUsername,
-					password: settings.couchDbPassword
-				},
+				connection,
 				(docsRead) => {
 					this.onStatusChange({
 						state: "pulling",
@@ -236,6 +241,7 @@ export class SyncService {
 				skipped,
 				conflicts
 			});
+			await this.store.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pullFromCouchDb");
 
 			new Notice(
@@ -735,6 +741,15 @@ function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing"
 	}
 
 	return null;
+}
+
+function createCouchDbConnection(settings: MySyncSettings): CouchDbConnection {
+	return {
+		url: settings.couchDbUrl,
+		database: settings.couchDbDatabase,
+		username: settings.couchDbUsername,
+		password: settings.couchDbPassword
+	};
 }
 
 function isHttpUrl(value: string) {
