@@ -3,7 +3,7 @@ import type { MySyncSettings } from "settings";
 import type { CouchDbConnection, PouchDbFileStore } from "sync/pouchdb-store";
 import type { VaultFileRecord } from "sync/types";
 import {
-	collectFilesInFolder,
+	collectSyncableFilesInFolder,
 	createBinaryContentHash,
 	createFileRecord,
 	createFileRecordId,
@@ -13,6 +13,8 @@ import {
 	getSyncFolder,
 	getSyncFolderState,
 	isFileInsideSyncFolder,
+	isSyncBlacklistedPath,
+	isSyncableVaultFile,
 	isPathInsideSyncFolder
 } from "sync/vault-files";
 import { Logger } from "utils/logger";
@@ -318,7 +320,7 @@ export class SyncService {
 		const path = normalizeRestoredPath(rawPath);
 		const syncFolder = this.getCurrentSyncFolder();
 
-		if (!path || !isPathInsideSyncFolder(path, syncFolder)) {
+		if (!path || isSyncBlacklistedPath(path) || !isPathInsideSyncFolder(path, syncFolder)) {
 			return "skipped";
 		}
 
@@ -416,7 +418,7 @@ export class SyncService {
 			throw new Error(syncFolderState.message);
 		}
 
-		const files = collectFilesInFolder(syncFolderState.folder);
+		const files = collectSyncableFilesInFolder(syncFolderState.folder);
 		let savedCount = 0;
 		let skippedCount = 0;
 
@@ -490,7 +492,7 @@ export class SyncService {
 
 	private async restoreVaultFile(record: VaultFileRecord): Promise<"restored" | "skipped" | "conflict"> {
 		const path = normalizeRestoredPath(record.path);
-		if (!path || record.type !== "vault-file") {
+		if (!path || record.type !== "vault-file" || isSyncBlacklistedPath(path)) {
 			return "skipped";
 		}
 
@@ -584,7 +586,10 @@ export class SyncService {
 	}
 
 	async handleRenamedFile(abstractFile: TAbstractFile, oldPath: string) {
-		await this.store.deleteFileRecordByPath(oldPath);
+		if (!isSyncBlacklistedPath(oldPath)) {
+			await this.store.deleteFileRecordByPath(oldPath);
+		}
+
 		this.queueFileSync(abstractFile);
 	}
 
@@ -593,7 +598,10 @@ export class SyncService {
 			return;
 		}
 
-		if (abstractFile instanceof TFile && this.isFileInsideCurrentSyncFolder(abstractFile)) {
+		if (
+			abstractFile instanceof TFile
+			&& this.isFileInsideCurrentSyncFolder(abstractFile)
+		) {
 			await this.store.deleteFileRecordByPath(abstractFile.path);
 		}
 	}
@@ -702,7 +710,7 @@ export class SyncService {
 	}
 
 	private isFileInsideCurrentSyncFolder(file: TFile) {
-		return isFileInsideSyncFolder(file, this.getCurrentSyncFolder());
+		return isSyncableVaultFile(file) && isFileInsideSyncFolder(file, this.getCurrentSyncFolder());
 	}
 
 	private listCurrentVaultFileRecordIds() {
@@ -713,7 +721,7 @@ export class SyncService {
 			throw new Error(syncFolderState.message);
 		}
 
-		return collectFilesInFolder(syncFolderState.folder).map((file) => createFileRecordId(file.path));
+		return collectSyncableFilesInFolder(syncFolderState.folder).map((file) => createFileRecordId(file.path));
 	}
 
 	private getCurrentSyncFolder() {
@@ -722,6 +730,10 @@ export class SyncService {
 	}
 
 	private async syncFileIfChanged(file: TFile) {
+		if (!isSyncableVaultFile(file)) {
+			return false;
+		}
+
 		const record = await createFileRecord(this.app, file);
 		return this.store.saveFileRecordIfChanged(record);
 	}

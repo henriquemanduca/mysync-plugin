@@ -12,6 +12,7 @@ declare module "pouchdb" {
 
 		interface ReplicationOptions {
 			auth?: AuthOptions;
+			doc_ids?: string[];
 			live?: boolean;
 			retry?: boolean;
 			fetch?: (url: RequestInfo | URL, init?: RequestInit) => Promise<Response>;

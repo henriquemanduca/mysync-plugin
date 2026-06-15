@@ -4,9 +4,12 @@ import { PouchDbFileStore } from "sync/pouchdb-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/sync-service";
 import { formatDateTime } from "utils/date-format";
 import { Logger } from "utils/logger";
+import { isAndroidApp } from "utils/platform";
 
-// const logger = new Logger("MySyncPlugin");
+const logger = new Logger("MySyncPlugin");
+
 const IDLE_STATUS_DELAY_MS = 5000;
+const ANDROID_NOMEDIA_PATH = ".nomedia";
 const STRING_SETTING_KEYS = [
 	"localVaultId",
 	"customSyncFolder",
@@ -34,6 +37,7 @@ export default class MySyncPlugin extends Plugin {
 	async onload() {
 		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
 		await this.loadSettings();
+		await this.ensureAndroidNoMediaFile();
 
 		this.statusBarEl = this.addStatusBarItem();
 		this.updateSyncStatus({ state: "idle" });
@@ -184,6 +188,22 @@ export default class MySyncPlugin extends Plugin {
 
 	private getPluginDir() {
 		return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+	}
+
+	private async ensureAndroidNoMediaFile() {
+		if (!isAndroidApp()) {
+			return;
+		}
+
+		try {
+			if (await this.app.vault.adapter.exists(ANDROID_NOMEDIA_PATH, true)) {
+				return;
+			}
+
+			await this.app.vault.adapter.write(ANDROID_NOMEDIA_PATH, "");
+		} catch (error) {
+			logger.warn("Failed to create Android .nomedia file", error);
+		}
 	}
 }
 

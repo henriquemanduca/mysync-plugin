@@ -3,6 +3,9 @@ import type { VaultFileRecord, VaultFileType } from "sync/types";
 
 const VAULT_FILE_PREFIX = "vault-file";
 const FILE_ATTACHMENT_ID = "file";
+const BLACKLISTED_SYNC_FILE_NAMES = new Set([
+	".nomedia"
+]);
 const IMAGE_MIME_TYPES: Record<string, string> = {
 	avif: "image/avif",
 	bmp: "image/bmp",
@@ -93,8 +96,21 @@ export function collectFilesInFolder(folder: TFolder) {
 	return files;
 }
 
+export function collectSyncableFilesInFolder(folder: TFolder) {
+	return collectFilesInFolder(folder).filter(isSyncableVaultFile);
+}
+
 export function isFileInsideSyncFolder(file: TFile, syncFolder: string) {
 	return isPathInsideSyncFolder(file.path, syncFolder);
+}
+
+export function isSyncableVaultFile(file: TFile) {
+	return !isSyncBlacklistedPath(file.path);
+}
+
+export function isSyncBlacklistedPath(path: string) {
+	const fileName = path.split("/").pop();
+	return typeof fileName === "string" && BLACKLISTED_SYNC_FILE_NAMES.has(fileName);
 }
 
 export function isPathInsideSyncFolder(path: string, syncFolder: string) {

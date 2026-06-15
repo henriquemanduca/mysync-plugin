@@ -1,7 +1,7 @@
 import { requestUrl } from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
 import type { VaultFileRecord } from "sync/types";
-import { createFileRecordId } from "sync/vault-files";
+import { createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath } from "sync/vault-files";
 import { Logger } from "utils/logger";
 import { isPouchNotFound } from "utils/pouchdb-errors";
 
@@ -101,6 +101,7 @@ export class PouchDbFileStore {
 		return this.runWithLocalDb(async (fileDb) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
+			options.doc_ids = await this.listSyncableFileRecordIds();
 			let docsWritten = 0;
 
 			return new Promise<RemotePushResult>((resolve, reject) => {
@@ -169,11 +170,10 @@ export class PouchDbFileStore {
 		try {
 			const result = await remoteDb.allDocs({
 				startkey: VAULT_FILE_START_KEY,
-				endkey: VAULT_FILE_END_KEY,
-				limit: 1
+				endkey: VAULT_FILE_END_KEY
 			});
 
-			return result.rows.length > 0;
+			return result.rows.some((row) => isSyncableFileRecordId(row.id));
 		} finally {
 			await remoteDb.close();
 		}
@@ -237,6 +237,13 @@ export class PouchDbFileStore {
 				(row) => (row.doc ? [row.doc] : [])
 			);
 		});
+	}
+
+	async listSyncableFileRecordIds() {
+		const records = await this.listFileRecords();
+		return records
+			.map((record) => record._id)
+			.filter(isSyncableFileRecordId);
 	}
 
 	async listDeletedFileRecordIds(recordIds: string[]) {
@@ -336,6 +343,11 @@ export class PouchDbFileStore {
 
 function createRemoteDatabaseUrl(url: string, database: string) {
 	return `${url.replace(/\/+$/g, "")}/${encodeURIComponent(database)}`;
+}
+
+function isSyncableFileRecordId(recordId: string) {
+	const path = getPathFromFileRecordId(recordId);
+	return typeof path === "string" && !isSyncBlacklistedPath(path);
 }
 
 function createRemoteKey(connection: CouchDbConnection) {
