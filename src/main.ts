@@ -3,7 +3,7 @@ import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "setting
 import { PouchDbFileStore } from "sync/pouchdb-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/sync-service";
 import { formatDateTime } from "utils/date-format";
-import { Logger } from "utils/logger";
+import { isLoggerLevel, Logger } from "utils/logger";
 import { isAndroidApp } from "utils/platform";
 
 const logger = new Logger("MySyncPlugin");
@@ -131,6 +131,7 @@ export default class MySyncPlugin extends Plugin {
 	async loadSettings() {
 		const savedSettings = normalizeSavedSettings((await this.loadData()) as unknown);
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
+		Logger.setLevel(this.settings.logLevel);
 
 		if (!this.settings.localVaultId) {
 			this.settings.localVaultId = createLocalVaultId();
@@ -140,6 +141,15 @@ export default class MySyncPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+	}
+
+	updateLogLevel(value: unknown) {
+		if (!isLoggerLevel(value)) {
+			return;
+		}
+
+		this.settings.logLevel = value;
+		Logger.setLevel(value);
 	}
 
 	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
@@ -250,6 +260,10 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 
 	if (typeof data.syncOnStartup === "boolean") {
 		settings.syncOnStartup = data.syncOnStartup;
+	}
+
+	if (isLoggerLevel(data.logLevel)) {
+		settings.logLevel = data.logLevel;
 	}
 
 	return settings;

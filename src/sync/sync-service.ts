@@ -113,12 +113,18 @@ export class SyncService {
 	}
 
 	async pushToCouchDb() {
-		if (this.isRunning()) return;
+		if (this.isRunning()) {
+			logger.info("Push skipped because another sync operation is running");
+			return;
+		}
 
 		const settings = this.getSettings();
 		const validationMessage = validateCouchDbSettings(settings);
 
 		if (validationMessage) {
+			logger.warn("Push validation failed", undefined, {
+				message: validationMessage
+			});
 			this.onStatusChange({
 				state: "error",
 				message: validationMessage
@@ -132,11 +138,20 @@ export class SyncService {
 
 		const notice = new Notice("Start pushing.", 0);
 		try {
+			logger.info("Push started", {
+				database: settings.couchDbDatabase,
+				hasUsername: settings.couchDbUsername.length > 0,
+				hasPassword: settings.couchDbPassword.length > 0
+			});
+
 			const connection = createCouchDbConnection(settings);
 			const canPush = await this.store.canPushToCouchDb(connection);
 
 			if (!canPush) {
 				failed = true;
+				logger.warn("Push blocked because remote has records without local baseline", undefined, {
+					database: connection.database
+				});
 				this.onStatusChange({
 					state: "error",
 					message: "Push blocked"
@@ -146,6 +161,9 @@ export class SyncService {
 			}
 
 			await this.syncLocalFiles();
+			logger.info("Local file sync before push completed", {
+				database: connection.database
+			});
 
 			const pushResult = await this.store.pushToCouchDb(
 				connection,
@@ -156,17 +174,22 @@ export class SyncService {
 					});
 				}
 			);
+			logger.info("store.pushToCouchDb completed", {
+				database: connection.database,
+				docsWritten: pushResult.docsWritten
+			});
 
 			this.onStatusChange({
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+
 			await this.store.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pushToCouchDb");
 
 			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
 		} catch (error) {
-			notice.hide()
+			notice.hide();
 			failed = true;
 			logger.error("Push failed", error);
 			this.onStatusChange({
@@ -175,8 +198,7 @@ export class SyncService {
 			});
 			new Notice(getErrorMessage(error, "Push failed. Check the console for details."));
 		} finally {
-			notice.hide()
-
+			notice.hide();
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
 
@@ -419,6 +441,11 @@ export class SyncService {
 		}
 
 		const files = collectSyncableFilesInFolder(syncFolderState.folder);
+		logger.info("Local files collected for sync", {
+			syncFolder,
+			total: files.length
+		});
+
 		let savedCount = 0;
 		let skippedCount = 0;
 
@@ -430,6 +457,15 @@ export class SyncService {
 			} else {
 				skippedCount += 1;
 			}
+
+			logger.debug("Local file sync completed", {
+				current: index + 1,
+				total: files.length,
+				path: file.path,
+				saved,
+				savedCount,
+				skippedCount
+			});
 
 			this.onStatusChange({
 				state: "syncing",
@@ -615,12 +651,6 @@ export class SyncService {
 	}
 
 	private scheduleQueuedSync() {
-		// logger.method("scheduleQueuedSync", {
-		// 	pending: this.pendingSyncPaths.size,
-		// 	syncInProgress: this.syncInProgress,
-		// 	hasTimer: this.syncQueueTimer !== null
-		// });
-
 		if (this.pendingSyncPaths.size === 0 || this.syncInProgress || this.syncQueueTimer !== null) {
 			return;
 		}
@@ -632,11 +662,6 @@ export class SyncService {
 	}
 
 	private async syncQueuedFiles() {
-		// logger.method("syncQueuedFiles", {
-		// 	pending: this.pendingSyncPaths.size,
-		// 	syncInProgress: this.syncInProgress
-		// });
-
 		if (this.syncInProgress || this.pendingSyncPaths.size === 0) {
 			return;
 		}
@@ -731,10 +756,21 @@ export class SyncService {
 
 	private async syncFileIfChanged(file: TFile) {
 		if (!isSyncableVaultFile(file)) {
+			logger.debug("Skipped blacklisted local file", {
+				path: file.path
+			});
 			return false;
 		}
 
 		const record = await createFileRecord(this.app, file);
+		logger.debug("Local file record created", {
+			recordId: record._id,
+			path: record.path,
+			fileType: record.fileType,
+			size: record.size,
+			hasContent: typeof record.content === "string",
+			hasAttachments: typeof record._attachments === "object"
+		});
 		return this.store.saveFileRecordIfChanged(record);
 	}
 }

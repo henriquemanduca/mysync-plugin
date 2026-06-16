@@ -2,7 +2,18 @@ import type { DataAdapter } from "obsidian";
 import { normalizePath } from "obsidian";
 
 type LogContext = Record<string, unknown>;
-type LogLevel = "debug" | "error" | "info" | "log" | "warn";
+type LogLevel = "log" | "debug" | "info" | "warn" | "error";
+export type LoggerLevel = LogLevel | "off";
+
+const LOG_LEVEL_PRIORITIES: Record<LogLevel, number> = {
+	debug: 10,
+	log: 20,
+	info: 30,
+	warn: 40,
+	error: 50
+};
+
+const OFF_LOG_LEVEL_PRIORITY = 60;
 
 interface FileLogTarget {
 	adapter: DataAdapter;
@@ -11,6 +22,7 @@ interface FileLogTarget {
 
 export class Logger {
 	private static fileTarget: FileLogTarget | null = null;
+	private static level: LoggerLevel = "debug";
 	private static writeQueue = Promise.resolve();
 
 	constructor(private scope: string) { }
@@ -22,6 +34,10 @@ export class Logger {
 		};
 
 		Logger.enqueueFileWrite(`${formatTimestamp()} [info] [MySync:Logger] File logging started\n`);
+	}
+
+	static setLevel(level: LoggerLevel) {
+		Logger.level = level;
 	}
 
 	static async flush() {
@@ -53,6 +69,10 @@ export class Logger {
 	}
 
 	private write(level: LogLevel, message: string, context?: LogContext, error?: unknown) {
+		if (!Logger.shouldWrite(level)) {
+			return;
+		}
+
 		const prefix = `[MySync:${this.scope}] ${message}`;
 		const sanitizedContext = sanitizeForLog(context);
 		const sanitizedError = sanitizeForLog(error);
@@ -64,6 +84,14 @@ export class Logger {
 
 		console[level](...args);
 		Logger.enqueueFileWrite(formatLogLine(level, this.scope, message, sanitizedContext, sanitizedError));
+	}
+
+	private static shouldWrite(level: LogLevel) {
+		const configuredPriority = Logger.level === "off"
+			? OFF_LOG_LEVEL_PRIORITY
+			: LOG_LEVEL_PRIORITIES[Logger.level];
+
+		return LOG_LEVEL_PRIORITIES[level] >= configuredPriority;
 	}
 
 	private static enqueueFileWrite(line: string) {
@@ -79,6 +107,15 @@ export class Logger {
 				console.warn("[MySync:Logger] Failed to write log file", error);
 			});
 	}
+}
+
+export function isLoggerLevel(value: unknown): value is LoggerLevel {
+	return value === "debug" ||
+		value === "log" ||
+		value === "info" ||
+		value === "warn" ||
+		value === "error" ||
+		value === "off";
 }
 
 function formatLogLine(

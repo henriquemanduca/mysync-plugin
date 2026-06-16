@@ -2,6 +2,7 @@ import { App, PluginSettingTab, Setting } from "obsidian";
 import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type MySyncPlugin from "main";
 import { formatDateTime } from "utils/date-format";
+import type { LoggerLevel } from "utils/logger";
 
 export type SyncFolderMode = "vault-root" | "custom";
 
@@ -13,6 +14,7 @@ export interface MySyncSettings {
 	couchDbDatabase: string;
 	couchDbUsername: string;
 	couchDbPassword: string;
+	logLevel: LoggerLevel;
 	syncOnStartup: boolean;
 	lastSyncNowAt: string;
 	lastPushToCouchDbAt: string;
@@ -27,6 +29,7 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	couchDbDatabase: "mysync",
 	couchDbUsername: "",
 	couchDbPassword: "",
+	logLevel: "debug",
 	syncOnStartup: false,
 	lastSyncNowAt: "",
 	lastPushToCouchDbAt: "",
@@ -104,6 +107,22 @@ export class MySyncSettingTab extends PluginSettingTab {
 						control: {
 							type: "toggle",
 							key: "syncOnStartup"
+						}
+					},
+					{
+						name: "Log level",
+						desc: "Minimum level written to the console and mysync.log.",
+						control: {
+							type: "dropdown",
+							key: "logLevel",
+							options: {
+								debug: "Debug",
+								log: "Log",
+								info: "Info",
+								warn: "Warnings",
+								error: "Errors",
+								off: "Off"
+							}
 						}
 					},
 					this.createReadonlyDateSetting(
@@ -209,6 +228,9 @@ export class MySyncSettingTab extends PluginSettingTab {
 			case "syncOnStartup":
 				this.plugin.settings.syncOnStartup = Boolean(value);
 				break;
+			case "logLevel":
+				this.plugin.updateLogLevel(value);
+				break;
 			default:
 				return;
 		}
@@ -302,6 +324,24 @@ export class MySyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.syncOnStartup)
 					.onChange(async (value) => {
 						this.plugin.settings.syncOnStartup = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(localSectionEl)
+			.setName("Log level")
+			.setDesc("Minimum level written to the console and mysync.log.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("debug", "Debug")
+					.addOption("log", "Log")
+					.addOption("info", "Info")
+					.addOption("warn", "Warnings")
+					.addOption("error", "Errors")
+					.addOption("off", "Off")
+					.setValue(this.plugin.settings.logLevel)
+					.onChange(async (value) => {
+						this.plugin.updateLogLevel(value);
 						await this.plugin.saveSettings();
 					})
 			);

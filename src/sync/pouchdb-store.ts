@@ -1,9 +1,9 @@
-import { requestUrl } from "obsidian";
+import {requestUrl} from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
-import type { VaultFileRecord } from "sync/types";
-import { createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath } from "sync/vault-files";
-import { Logger } from "utils/logger";
-import { isPouchNotFound } from "utils/pouchdb-errors";
+import type {VaultFileRecord} from "sync/types";
+import {createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath} from "sync/vault-files";
+import {Logger} from "utils/logger";
+import {isPouchNotFound} from "utils/pouchdb-errors";
 
 export interface CouchDbConnection {
 	url: string;
@@ -56,11 +56,17 @@ export class PouchDbFileStore {
 	}
 
 	async saveFileRecordIfChanged(record: VaultFileRecord) {
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("saveFileRecordIfChanged", async (fileDb) => {
 			try {
 				const existing = await fileDb.get(record._id);
 
 				if (existing.contentHash === record.contentHash) {
+					logger.debug("File record unchanged", {
+						recordId: record._id,
+						path: record.path,
+						fileType: record.fileType,
+						size: record.size
+					});
 					return false;
 				}
 
@@ -68,10 +74,24 @@ export class PouchDbFileStore {
 					...record,
 					_rev: existing._rev
 				});
+				logger.debug("Changed file record updated", {
+					recordId: record._id,
+					path: record.path
+				});
 				return true;
 			} catch (error) {
 				if (isPouchNotFound(error)) {
+					logger.debug("Creating new file record", {
+						recordId: record._id,
+						path: record.path,
+						fileType: record.fileType,
+						size: record.size
+					});
 					await fileDb.put(record);
+					logger.debug("New file record created", {
+						recordId: record._id,
+						path: record.path
+					});
 					return true;
 				}
 
@@ -85,7 +105,7 @@ export class PouchDbFileStore {
 	}
 
 	async deleteFileRecordById(recordId: string) {
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("deleteFileRecordById", async (fileDb) => {
 			try {
 				const existing = await fileDb.get(recordId);
 				await fileDb.remove(existing);
@@ -98,26 +118,78 @@ export class PouchDbFileStore {
 	}
 
 	async pushToCouchDb(connection: CouchDbConnection, onProgress: (docsWritten: number) => void) {
-		return this.runWithLocalDb(async (fileDb) => {
+		logger.info("Push to CouchDB requested", {
+			database: connection.database,
+			hasUsername: connection.username.length > 0,
+			hasPassword: connection.password.length > 0
+		});
+
+		return this.runWithLocalDb("pushToCouchDb", async (fileDb) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
-			options.doc_ids = await this.listSyncableFileRecordIds();
+
+			logger.info("Listing syncable file records before push", {
+				database: connection.database
+			});
+
+			options.doc_ids = await this.listSyncableFileRecordIdsFromDb(fileDb);
+
+			logger.info("Syncable file records listed for push", {
+				database: connection.database,
+				docIdsCount: options.doc_ids.length
+			});
+
 			let docsWritten = 0;
 
 			return new Promise<RemotePushResult>((resolve, reject) => {
+				logger.info("Starting PouchDB push replication", {
+					database: connection.database,
+					docIdsCount: options.doc_ids?.length ?? 0
+				});
+
 				fileDb.replicate
 					.to(remoteUrl, options)
+					.on("active", () => {
+						logger.info("PouchDB push replication active", {
+							database: connection.database,
+							docsWritten
+						});
+					})
+					.on("paused", () => {
+						logger.info("PouchDB push replication paused", {
+							database: connection.database,
+							docsWritten
+						});
+					})
 					.on("change", (change) => {
 						docsWritten += change.docs_written ?? 0;
+						logger.info("PouchDB push replication changed", {
+							database: connection.database,
+							changeDocsWritten: change.docs_written ?? 0,
+							docsWritten
+						});
 						onProgress(docsWritten);
 					})
 					.on("denied", (error) => {
+						logger.error("PouchDB push replication denied", error, {
+							database: connection.database,
+							docsWritten
+						});
 						reject(toError(error));
 					})
 					.on("error", (error) => {
+						logger.error("PouchDB push replication failed", error, {
+							database: connection.database,
+							docsWritten
+						});
 						reject(toError(error));
 					})
 					.on("complete", (result) => {
+						logger.info("PouchDB push replication completed", {
+							database: connection.database,
+							resultDocsWritten: result.docs_written,
+							docsWritten
+						});
 						resolve({
 							docsWritten: result.docs_written ?? docsWritten
 						});
@@ -136,7 +208,7 @@ export class PouchDbFileStore {
 	}
 
 	async pullFromCouchDb(connection: CouchDbConnection, onProgress: (docsRead: number) => void) {
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("pullFromCouchDb", async (fileDb) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
 			let docsRead = 0;
@@ -180,7 +252,7 @@ export class PouchDbFileStore {
 	}
 
 	async hasRemoteBaseline(connection: CouchDbConnection) {
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("hasRemoteBaseline", async (fileDb) => {
 			const baselineId = await createRemoteBaselineLocalDocumentId(connection);
 
 			try {
@@ -197,7 +269,7 @@ export class PouchDbFileStore {
 	}
 
 	async markRemoteBaseline(connection: CouchDbConnection) {
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("markRemoteBaseline", async (fileDb) => {
 			const baselineId = await createRemoteBaselineLocalDocumentId(connection);
 			const remoteKey = createRemoteKey(connection);
 			const localDocs = getLocalDocumentStore(fileDb);
@@ -226,24 +298,53 @@ export class PouchDbFileStore {
 	}
 
 	async listFileRecords() {
-		return this.runWithLocalDb(async (fileDb) => {
-			const result = await fileDb.allDocs({
-				include_docs: true,
-				attachments: true,
-				binary: true
-			});
+		logger.debug("List file records requested");
 
-			return result.rows.flatMap(
-				(row) => (row.doc ? [row.doc] : [])
-			);
+		return this.runWithLocalDb("listFileRecords", async (fileDb) => {
+			return this.listFileRecordsFromDb(fileDb);
 		});
 	}
 
 	async listSyncableFileRecordIds() {
+		logger.debug("List syncable file record ids requested");
 		const records = await this.listFileRecords();
-		return records
+		const recordIds = records
 			.map((record) => record._id)
 			.filter(isSyncableFileRecordId);
+
+		logger.debug("List syncable file record ids completed", {
+			totalRecords: records.length,
+			syncableRecords: recordIds.length
+		});
+
+		return recordIds;
+	}
+
+	private async listSyncableFileRecordIdsFromDb(fileDb: PouchDB<VaultFileRecord>) {
+		logger.debug("List syncable file record ids from active database requested");
+		const records = await this.listFileRecordsFromDb(fileDb);
+		const recordIds = records
+			.map((record) => record._id)
+			.filter(isSyncableFileRecordId);
+
+		logger.debug("List syncable file record ids from active database completed", {
+			totalRecords: records.length,
+			syncableRecords: recordIds.length
+		});
+
+		return recordIds;
+	}
+
+	private async listFileRecordsFromDb(fileDb: PouchDB<VaultFileRecord>) {
+		const result = await fileDb.allDocs({
+			include_docs: true,
+			attachments: true,
+			binary: true
+		});
+
+		return result.rows.flatMap(
+			(row) => (row.doc ? [row.doc] : [])
+		);
 	}
 
 	async listDeletedFileRecordIds(recordIds: string[]) {
@@ -251,7 +352,7 @@ export class PouchDbFileStore {
 			return [];
 		}
 
-		return this.runWithLocalDb(async (fileDb) => {
+		return this.runWithLocalDb("listDeletedFileRecordIds", async (fileDb) => {
 			const uniqueRecordIds = Array.from(new Set(recordIds));
 			const deletedRecordIds = new Set<string>();
 
@@ -317,10 +418,17 @@ export class PouchDbFileStore {
 		await closeOperation;
 	}
 
-	private runWithLocalDb<T>(operation: (fileDb: PouchDB<VaultFileRecord>) => Promise<T>) {
+	private runWithLocalDb<T>(
+		operationName: string,
+		operation: (fileDb: PouchDB<VaultFileRecord>) => Promise<T>
+	) {
 		const queuedOperation = this.operationQueue.then(async () => {
 			this.ensureLocalDbOpen();
-			return operation(this.fileDb);
+			try {
+				return await operation(this.fileDb);
+			} catch (error) {
+				throw error;
+			}
 		});
 
 		this.operationQueue = queuedOperation.then(
