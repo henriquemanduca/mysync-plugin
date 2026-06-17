@@ -427,6 +427,7 @@ export class PouchDbFileStore {
 			try {
 				return await operation(this.fileDb);
 			} catch (error) {
+				logger.error(`operation from ${operationName} fail`, error);
 				throw error;
 			}
 		});
