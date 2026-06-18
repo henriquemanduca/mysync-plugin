@@ -55,6 +55,47 @@ export class PouchDbFileStore {
 		this.fileDb = new PouchDB<VaultFileRecord>(localDatabaseName);
 	}
 
+	async switchLocalDatabase(localDatabaseName: string) {
+		const previousLocalDatabaseName = this.localDatabaseName;
+		const switchOperation = this.operationQueue.then(async () => {
+			if (!this.fileDbClosed) {
+				await this.fileDb.close();
+			}
+
+			this.localDatabaseName = localDatabaseName;
+			this.fileDb = new PouchDB<VaultFileRecord>(localDatabaseName);
+			this.fileDbClosed = false;
+			return previousLocalDatabaseName;
+		});
+
+		this.operationQueue = switchOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		return switchOperation;
+	}
+
+	async destroyLocalDatabase(localDatabaseName: string) {
+		const destroyOperation = this.operationQueue.then(async () => {
+			if (localDatabaseName === this.localDatabaseName) {
+				if (!this.fileDbClosed) {
+					await this.fileDb.close();
+					this.fileDbClosed = true;
+				}
+			}
+
+			await new PouchDB<VaultFileRecord>(localDatabaseName).destroy();
+		});
+
+		this.operationQueue = destroyOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		await destroyOperation;
+	}
+
 	async saveFileRecordIfChanged(record: VaultFileRecord) {
 		return this.runWithLocalDb("saveFileRecordIfChanged", async (fileDb) => {
 			try {

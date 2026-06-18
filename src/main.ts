@@ -81,6 +81,14 @@ export default class MySyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "reset-local-database",
+			name: "Reset local database",
+			callback: () => {
+				void this.resetLocalDatabase();
+			}
+		});
+
+		this.addCommand({
 			id: "test-remote-connection",
 			name: "Test remote connection",
 			callback: () => {
@@ -150,6 +158,25 @@ export default class MySyncPlugin extends Plugin {
 
 		this.settings.logLevel = value;
 		Logger.setLevel(value);
+	}
+
+	async resetLocalDatabase() {
+		const localVaultId = createLocalVaultId();
+		const previousLocalVaultId = this.settings.localVaultId;
+
+		await this.syncService.resetLocalDatabase(
+			createLocalDatabaseName(localVaultId),
+			async () => {
+				this.settings.localVaultId = localVaultId;
+
+				try {
+					await this.saveSettings();
+				} catch (error) {
+					this.settings.localVaultId = previousLocalVaultId;
+					throw error;
+				}
+			}
+		);
 	}
 
 	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
@@ -312,6 +339,12 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 				returnToIdle: true
 			};
 		}
+
+		case "resetting":
+			return {
+				text: "resetting",
+				title: "Resetting local database"
+			};
 
 		case "pushing":
 			return {

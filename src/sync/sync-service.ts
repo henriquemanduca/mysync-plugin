@@ -44,6 +44,7 @@ export type SyncStatus =
 	| { state: "queued"; pending: number }
 	| { state: "syncing"; current: number; total: number; saved: number; skipped: number }
 	| { state: "done"; total: number; saved: number; skipped: number }
+	| { state: "resetting" }
 	| { state: "pushing"; docsWritten: number }
 	| { state: "pushed"; docsWritten: number }
 	| { state: "pulling"; docsRead: number }
@@ -227,49 +228,11 @@ export class SyncService {
 		const notice = new Notice("Start pulling.", 0);
 
 		try {
-			const connection = createCouchDbConnection(settings);
-			const localRecordsBeforePull = await this.store.listFileRecords();
-			const localRecordsById = new Map(localRecordsBeforePull.map(
-				(record) => [record._id, record])
-			);
-			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
-
-			const pullResult = await this.store.pullFromCouchDb(
-				connection,
-				(docsRead) => {
-					this.onStatusChange({
-						state: "pulling",
-						docsRead
-					});
-				}
-			);
-
-			const deletionCandidateIds = Array.from(
-				new Set([
-					...localRecordsById.keys(),
-					...localVaultRecordIds
-				])
-			);
-
-			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
-			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
-			const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
-			const skipped = restoreResult.skipped + deletionResult.skipped;
-			const conflicts = restoreResult.conflicts + deletionResult.conflicts;
-
-			this.onStatusChange({
-				state: "pulled",
-				docsRead: pullResult.docsRead,
-				restored: restoreResult.restored,
-				deleted: deletionResult.deleted,
-				skipped,
-				conflicts
-			});
-			await this.store.markRemoteBaseline(connection);
+			const result = await this.performPullFromCouchDb(createCouchDbConnection(settings));
 			await this.onOperationCompleted("pullFromCouchDb");
 
 			new Notice(
-				`Read ${pullResult.docsRead}. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
+				`Read ${result.docsRead}. Restored ${result.restored}, deleted ${result.deleted}, skipped ${result.skipped}, conflicts ${result.conflicts}.`
 			);
 		} catch (error) {
 			logger.error("CouchDB pull failed", error);
@@ -283,6 +246,132 @@ export class SyncService {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
 		}
+	}
+
+	async resetLocalDatabase(
+		localDatabaseName: string,
+		persistNewLocalDatabase: () => Promise<void>
+	) {
+		if (this.isRunning()) return;
+
+		const settings = this.getSettings();
+		const validationMessage = validateCouchDbSettings(settings, "resetting local database");
+
+		if (validationMessage) {
+			this.onStatusChange({
+				state: "error",
+				message: validationMessage
+			});
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+		this.clearQueuedSync();
+		this.onStatusChange({ state: "resetting" });
+
+		let failed = false;
+		let previousLocalDatabaseName: string | null = null;
+		const notice = new Notice("Resetting local database.", 0);
+
+		try {
+			const connection = createCouchDbConnection(settings);
+			previousLocalDatabaseName = await this.store.switchLocalDatabase(localDatabaseName);
+			const result = await this.performPullFromCouchDb(connection);
+
+			await persistNewLocalDatabase();
+
+			try {
+				await this.store.destroyLocalDatabase(previousLocalDatabaseName);
+			} catch (error) {
+				logger.warn("Failed to delete previous local database", error, {
+					localDatabaseName: previousLocalDatabaseName
+				});
+				new Notice("Local database reset finished, but the previous local database could not be deleted.");
+			}
+
+			await this.onOperationCompleted("pullFromCouchDb");
+			new Notice(
+				`Local database reset. Read ${result.docsRead}. Restored ${result.restored}, deleted ${result.deleted}, skipped ${result.skipped}, conflicts ${result.conflicts}.`
+			);
+		} catch (error) {
+			failed = true;
+			logger.error("Local database reset failed", error);
+
+			if (previousLocalDatabaseName !== null) {
+				try {
+					await this.store.switchLocalDatabase(previousLocalDatabaseName);
+					await this.store.destroyLocalDatabase(localDatabaseName);
+				} catch (rollbackError) {
+					logger.warn("Failed to roll back local database reset", rollbackError, {
+						localDatabaseName,
+						previousLocalDatabaseName
+					});
+				}
+			}
+
+			this.onStatusChange({
+				state: "error",
+				message: "Local database reset failed"
+			});
+			new Notice(getErrorMessage(error, "Local database reset failed. Check the console for details."));
+		} finally {
+			notice.hide();
+			this.syncInProgress = false;
+
+			if (!failed) {
+				this.refreshQueuedStatus();
+			}
+		}
+	}
+
+	private async performPullFromCouchDb(connection: CouchDbConnection) {
+		const localRecordsBeforePull = await this.store.listFileRecords();
+		const localRecordsById = new Map(localRecordsBeforePull.map(
+			(record) => [record._id, record])
+		);
+		const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
+
+		const pullResult = await this.store.pullFromCouchDb(
+			connection,
+			(docsRead) => {
+				this.onStatusChange({
+					state: "pulling",
+					docsRead
+				});
+			}
+		);
+
+		const deletionCandidateIds = Array.from(
+			new Set([
+				...localRecordsById.keys(),
+				...localVaultRecordIds
+			])
+		);
+
+		const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
+		const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
+		const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
+		const skipped = restoreResult.skipped + deletionResult.skipped;
+		const conflicts = restoreResult.conflicts + deletionResult.conflicts;
+
+		this.onStatusChange({
+			state: "pulled",
+			docsRead: pullResult.docsRead,
+			restored: restoreResult.restored,
+			deleted: deletionResult.deleted,
+			skipped,
+			conflicts
+		});
+		await this.store.markRemoteBaseline(connection);
+
+		return {
+			docsRead: pullResult.docsRead,
+			restored: restoreResult.restored,
+			deleted: deletionResult.deleted,
+			skipped,
+			conflicts
+		};
 	}
 
 	private async deleteRemoteDeletedFiles(
@@ -643,11 +732,18 @@ export class SyncService {
 	}
 
 	close() {
-		if (this.syncQueueTimer !== null) {
-			window.clearTimeout(this.syncQueueTimer);
-		}
+		this.clearQueuedSync();
 
 		void this.store.close();
+	}
+
+	private clearQueuedSync() {
+		this.pendingSyncPaths.clear();
+
+		if (this.syncQueueTimer !== null) {
+			window.clearTimeout(this.syncQueueTimer);
+			this.syncQueueTimer = null;
+		}
 	}
 
 	private scheduleQueuedSync() {

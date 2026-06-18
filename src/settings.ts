@@ -139,7 +139,14 @@ export class MySyncSettingTab extends PluginSettingTab {
 						"Last pull from CouchDB",
 						"Last successful remote pull execution.",
 						"lastPullFromCouchDbAt"
-					)
+					),
+					{
+						name: "Reset local database",
+						desc: "Create a new local PouchDB database, pull from CouchDB, then delete the previous local database.",
+						action: () => {
+							void this.plugin.resetLocalDatabase();
+						}
+					}
 				]
 			},
 			{
@@ -364,6 +371,17 @@ export class MySyncSettingTab extends PluginSettingTab {
 			"Last successful remote pull execution.",
 			this.plugin.settings.lastPullFromCouchDbAt
 		);
+
+		new Setting(localSectionEl)
+			.setName("Reset local database")
+			.setDesc("Create a new local PouchDB database, pull from CouchDB, then delete the previous local database.")
+			.addButton((button) => {
+				button
+					.setButtonText("Reset")
+					.onClick(() => {
+						void this.plugin.resetLocalDatabase();
+					});
+			});
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")
