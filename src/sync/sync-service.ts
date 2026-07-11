@@ -1,7 +1,7 @@
 import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
-import type { MySyncSettings } from "settings";
-import type { CouchDbConnection, PouchDbFileStore } from "sync/pouchdb-store";
-import type { VaultFileRecord } from "sync/types";
+import type { MySyncSettings } from "../settings";
+import type { CouchDbConnection, PouchDbFileStore } from "./pouchdb-store";
+import type { VaultFileRecord } from "./types";
 import {
 	collectSyncableFilesInFolder,
 	createBinaryContentHash,
@@ -16,8 +16,8 @@ import {
 	isSyncBlacklistedPath,
 	isSyncableVaultFile,
 	isPathInsideSyncFolder
-} from "sync/vault-files";
-import { Logger } from "utils/logger";
+} from "./vault-files";
+import { Logger } from "../utils/logger";
 
 interface LocalSyncResult {
 	total: number;

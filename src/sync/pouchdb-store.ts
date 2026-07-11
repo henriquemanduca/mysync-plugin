@@ -1,9 +1,9 @@
-import {requestUrl} from "obsidian";
+import { requestUrl } from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
-import type {VaultFileRecord} from "sync/types";
-import {createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath} from "sync/vault-files";
-import {Logger} from "utils/logger";
-import {isPouchNotFound} from "utils/pouchdb-errors";
+import type { VaultFileRecord } from "./types";
+import { createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath } from "./vault-files";
+import { Logger } from "../utils/logger";
+import { isPouchNotFound } from "../utils/pouchdb-errors";
 
 export interface CouchDbConnection {
 	url: string;

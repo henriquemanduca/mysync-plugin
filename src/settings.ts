@@ -1,8 +1,8 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
-import type MySyncPlugin from "main";
-import { formatDateTime } from "utils/date-format";
-import type { LoggerLevel } from "utils/logger";
+import type MySyncPlugin from "./main";
+import { formatDateTime } from "./utils/date-format";
+import type { LoggerLevel } from "./utils/logger";
 
 export type SyncFolderMode = "vault-root" | "custom";
 

@@ -10,3 +10,6 @@ indent_size = 4
 [*.md]
 indent_style = space
 indent_size = 2
+
+[*.{ts,tsx}]
+ij_typescript_spaces_within_imports = true

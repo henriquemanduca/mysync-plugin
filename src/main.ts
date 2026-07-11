@@ -1,10 +1,10 @@
 import { Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "settings";
-import { PouchDbFileStore } from "sync/pouchdb-store";
-import { SyncService, type CompletedSyncOperation, type SyncStatus } from "sync/sync-service";
-import { formatDateTime } from "utils/date-format";
-import { isLoggerLevel, Logger } from "utils/logger";
-import { isAndroidApp } from "utils/platform";
+import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "./settings";
+import { PouchDbFileStore } from "./sync/pouchdb-store";
+import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
+import { formatDateTime } from "./utils/date-format";
+import { isLoggerLevel, Logger } from "./utils/logger";
+import { isAndroidApp } from "./utils/platform";
 
 const logger = new Logger("MySyncPlugin");
 

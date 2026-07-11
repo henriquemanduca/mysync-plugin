@@ -1,5 +1,5 @@
 import { App, TFile, TFolder } from "obsidian";
-import type { VaultFileRecord, VaultFileType } from "sync/types";
+import type { VaultFileRecord, VaultFileType } from "./types";
 
 const VAULT_FILE_PREFIX = "vault-file";
 const FILE_ATTACHMENT_ID = "file";
