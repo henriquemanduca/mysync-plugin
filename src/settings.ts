@@ -15,7 +15,6 @@ export interface MySyncSettings {
 	couchDbUsername: string;
 	couchDbPassword: string;
 	logLevel: LoggerLevel;
-	syncOnStartup: boolean;
 	lastSyncNowAt: string;
 	lastPushToCouchDbAt: string;
 	lastPullFromCouchDbAt: string;
@@ -30,7 +29,6 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	couchDbUsername: "",
 	couchDbPassword: "",
 	logLevel: "debug",
-	syncOnStartup: false,
 	lastSyncNowAt: "",
 	lastPushToCouchDbAt: "",
 	lastPullFromCouchDbAt: ""
@@ -99,14 +97,6 @@ export class MySyncSettingTab extends PluginSettingTab {
 							key: "customSyncFolder",
 							placeholder: "Projects/MySync",
 							disabled: () => this.plugin.settings.syncFolderMode !== "custom"
-						}
-					},
-					{
-						name: "Sync on startup",
-						desc: "Run a sync when Obsidian loads the plugin.",
-						control: {
-							type: "toggle",
-							key: "syncOnStartup"
 						}
 					},
 					{
@@ -225,9 +215,6 @@ export class MySyncSettingTab extends PluginSettingTab {
 			case "couchDbUsername":
 				this.plugin.settings.couchDbUsername = String(value).trim();
 				break;
-			case "syncOnStartup":
-				this.plugin.settings.syncOnStartup = Boolean(value);
-				break;
 			case "logLevel":
 				this.plugin.updateLogLevel(value);
 				break;
@@ -312,18 +299,6 @@ export class MySyncSettingTab extends PluginSettingTab {
 					.setDisabled(this.plugin.settings.syncFolderMode !== "custom")
 					.onChange(async (value) => {
 						this.plugin.settings.customSyncFolder = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-
-		new Setting(localSectionEl)
-			.setName("Sync on startup")
-			.setDesc("Run a sync when Obsidian loads the plugin.")
-			.addToggle((toggle) =>
-				toggle
-					.setValue(this.plugin.settings.syncOnStartup)
-					.onChange(async (value) => {
-						this.plugin.settings.syncOnStartup = value;
 						await this.plugin.saveSettings();
 					})
 			);

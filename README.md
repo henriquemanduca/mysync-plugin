@@ -65,7 +65,6 @@ Open **Settings -> MySync** in Obsidian.
 - **Folder source**: choose whether to sync the vault root or a custom folder.
 - **Custom sync folder**: folder path inside the vault when custom mode is
   selected.
-- **Sync on startup**: run a local sync when Obsidian loads the plugin.
 - **Last sync now**, **Last push to CouchDB**, and **Last pull from CouchDB**:
   read-only timestamps for successful operations.
 

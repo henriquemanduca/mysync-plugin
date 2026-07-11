@@ -123,9 +123,6 @@ export default class MySyncPlugin extends Plugin {
 				)
 			);
 
-			if (this.settings.syncOnStartup) {
-				void this.syncService.syncNow();
-			}
 		});
 	}
 
@@ -264,10 +261,6 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 
 	if (isSyncFolderMode(data.syncFolderMode)) {
 		settings.syncFolderMode = data.syncFolderMode;
-	}
-
-	if (typeof data.syncOnStartup === "boolean") {
-		settings.syncOnStartup = data.syncOnStartup;
 	}
 
 	if (isLoggerLevel(data.logLevel)) {
