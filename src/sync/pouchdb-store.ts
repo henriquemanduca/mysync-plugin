@@ -20,9 +20,15 @@ export interface RemotePullResult {
 	docsRead: number;
 }
 
+export interface RemotePushOptions {
+	docIds?: string[];
+	pendingChangesOnly?: boolean;
+}
+
 const logger = new Logger("PouchDbFileStore");
 const VAULT_FILE_START_KEY = "vault-file:";
 const VAULT_FILE_END_KEY = "vault-file:\ufff0";
+const LOCAL_SYNC_BASELINE_LOCAL_DOC_ID = "_local/mysync-local-sync-baseline";
 const REMOTE_BASELINE_LOCAL_DOC_PREFIX = "_local/mysync-remote-baseline:";
 
 type OpenRevision<T extends { _id: string }> =
@@ -41,9 +47,19 @@ interface RemoteBaselineDocument {
 	savedAt: string;
 }
 
+interface LocalSyncBaselineDocument {
+	_id: string;
+	_rev?: string;
+	type: "mysync-local-sync-baseline";
+	syncFolder: string;
+	savedAt: string;
+}
+
+type BaselineDocument = LocalSyncBaselineDocument | RemoteBaselineDocument;
+
 interface LocalDocumentStore {
-	get(id: string): Promise<RemoteBaselineDocument & PouchDB.ExistingDocument>;
-	put(doc: RemoteBaselineDocument): Promise<unknown>;
+	get(id: string): Promise<BaselineDocument & PouchDB.ExistingDocument>;
+	put(doc: BaselineDocument): Promise<unknown>;
 }
 
 export class PouchDbFileStore {
@@ -117,7 +133,11 @@ export class PouchDbFileStore {
 		});
 	}
 
-	async pushToCouchDb(connection: CouchDbConnection, onProgress: (docsWritten: number) => void) {
+	async pushToCouchDb(
+		connection: CouchDbConnection,
+		onProgress: (docsWritten: number) => void,
+		pushOptions: RemotePushOptions = {}
+	) {
 		logger.info("Push to CouchDB requested", {
 			database: connection.database,
 			hasUsername: connection.username.length > 0,
@@ -128,15 +148,23 @@ export class PouchDbFileStore {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
 
-			logger.info("Listing syncable file records before push", {
-				database: connection.database
-			});
+			if (pushOptions.pendingChangesOnly) {
+				logger.info("Using PouchDB checkpoint for pending changes push", {
+					database: connection.database
+				});
+			} else if (pushOptions.docIds) {
+				options.doc_ids = Array.from(new Set(pushOptions.docIds)).filter(isSyncableFileRecordId);
+			} else {
+				logger.info("Listing syncable file records before push", {
+					database: connection.database
+				});
 
-			options.doc_ids = await this.listSyncableFileRecordIdsFromDb(fileDb);
+				options.doc_ids = await this.listSyncableFileRecordIdsFromDb(fileDb);
+			}
 
 			logger.info("Syncable file records listed for push", {
 				database: connection.database,
-				docIdsCount: options.doc_ids.length
+				docIdsCount: options.doc_ids?.length ?? 0
 			});
 
 			let docsWritten = 0;
@@ -261,6 +289,49 @@ export class PouchDbFileStore {
 			} catch (error) {
 				if (isPouchNotFound(error)) {
 					return false;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async hasLocalSyncBaseline(syncFolder: string) {
+		return this.runWithLocalDb("hasLocalSyncBaseline", async (fileDb) => {
+			try {
+				const baseline = await getLocalDocumentStore(fileDb).get(LOCAL_SYNC_BASELINE_LOCAL_DOC_ID);
+				return baseline.type === "mysync-local-sync-baseline"
+					&& baseline.syncFolder === syncFolder;
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					return false;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async markLocalSyncBaseline(syncFolder: string) {
+		return this.runWithLocalDb("markLocalSyncBaseline", async (fileDb) => {
+			const localDocs = getLocalDocumentStore(fileDb);
+			const baseline: LocalSyncBaselineDocument = {
+				_id: LOCAL_SYNC_BASELINE_LOCAL_DOC_ID,
+				type: "mysync-local-sync-baseline",
+				syncFolder,
+				savedAt: new Date().toISOString()
+			};
+
+			try {
+				const existing = await localDocs.get(LOCAL_SYNC_BASELINE_LOCAL_DOC_ID);
+				await localDocs.put({
+					...baseline,
+					_rev: existing._rev
+				});
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					await localDocs.put(baseline);
+					return;
 				}
 
 				throw error;

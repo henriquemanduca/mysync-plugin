@@ -73,6 +73,14 @@ export default class MySyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "push-pending-files-to-remote",
+			name: "Push pending files to remote",
+			callback: () => {
+				void this.syncService.pushPendingFilesToCouchDb();
+			}
+		});
+
+		this.addCommand({
 			id: "pull-from-remote",
 			name: "Pull from remote",
 			callback: () => {

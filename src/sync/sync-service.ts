@@ -208,6 +208,104 @@ export class SyncService {
 		}
 	}
 
+	async pushPendingFilesToCouchDb() {
+		if (this.isRunning()) {
+			logger.info("Pending files push skipped because another sync operation is running");
+			return;
+		}
+
+		const settings = this.getSettings();
+		const validationMessage = validateCouchDbSettings(settings);
+
+		if (validationMessage) {
+			this.onStatusChange({
+				state: "error",
+				message: validationMessage
+			});
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+		let failed = false;
+		const notice = new Notice("Pushing pending changes.", 0);
+		let pendingPaths: string[] = [];
+
+		try {
+			const connection = createCouchDbConnection(settings);
+			const syncFolder = this.getCurrentSyncFolder();
+			const [hasLocalSyncBaseline, hasRemoteBaseline] = await Promise.all([
+				this.store.hasLocalSyncBaseline(syncFolder),
+				this.store.hasRemoteBaseline(connection)
+			]);
+			const blockingState = getPendingPushBlockingState(
+				hasLocalSyncBaseline,
+				hasRemoteBaseline
+			);
+
+			if (blockingState) {
+				failed = true;
+				this.onStatusChange({
+					state: "error",
+					message: blockingState.statusMessage
+				});
+				new Notice(blockingState.noticeMessage);
+				return;
+			}
+
+			pendingPaths = this.takePendingSyncPaths();
+
+			try {
+				await this.syncFilePaths(pendingPaths);
+			} catch (error) {
+				for (const path of pendingPaths) {
+					this.pendingSyncPaths.add(path);
+				}
+
+				throw error;
+			}
+
+			const pushResult = await this.store.pushToCouchDb(
+				connection,
+				(docsWritten) => {
+					this.onStatusChange({
+						state: "pushing",
+						docsWritten
+					});
+				},
+				{ pendingChangesOnly: true }
+			);
+
+			logger.info("Pending files push completed", {
+				database: connection.database,
+				preparedPaths: pendingPaths.length,
+				docsWritten: pushResult.docsWritten
+			});
+			this.onStatusChange({
+				state: "pushed",
+				docsWritten: pushResult.docsWritten
+			});
+			await this.onOperationCompleted("pushToCouchDb");
+			new Notice(`Pushed ${pushResult.docsWritten} pending document(s).`);
+		} catch (error) {
+			failed = true;
+			logger.error("Pending files push failed", error);
+			this.onStatusChange({
+				state: "error",
+				message: "Pending files push failed"
+			});
+			new Notice(getErrorMessage(error, "Pending files push failed. Check the console for details."));
+		} finally {
+			notice.hide();
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+
+			if (!failed) {
+				this.refreshQueuedStatus();
+			}
+		}
+	}
+
 	async pullFromCouchDb() {
 		if (this.isRunning()) return;
 
@@ -476,6 +574,8 @@ export class SyncService {
 			});
 		}
 
+		await this.store.markLocalSyncBaseline(syncFolder);
+
 		return {
 			total: files.length,
 			saved: savedCount,
@@ -668,43 +768,24 @@ export class SyncService {
 
 		this.syncInProgress = true;
 		let failed = false;
+		const paths = this.takePendingSyncPaths();
 
 		try {
-			const paths = Array.from(this.pendingSyncPaths);
-			this.pendingSyncPaths.clear();
-			let savedCount = 0;
-			let skippedCount = 0;
-
-			for (const [index, path] of paths.entries()) {
-				const abstractFile = this.app.vault.getAbstractFileByPath(path);
-
-				if (abstractFile instanceof TFile && this.isFileInsideCurrentSyncFolder(abstractFile)) {
-					const saved = await this.syncFileIfChanged(abstractFile);
-
-					if (saved) {
-						savedCount += 1;
-					} else {
-						skippedCount += 1;
-					}
-				}
-
-				this.onStatusChange({
-					state: "syncing",
-					current: index + 1,
-					total: paths.length,
-					saved: savedCount,
-					skipped: skippedCount
-				});
-			}
+			const result = await this.syncFilePaths(paths);
 
 			this.onStatusChange({
 				state: "done",
-				total: paths.length,
-				saved: savedCount,
-				skipped: skippedCount
+				total: result.total,
+				saved: result.saved,
+				skipped: result.skipped
 			});
 		} catch (error) {
 			failed = true;
+
+			for (const path of paths) {
+				this.pendingSyncPaths.add(path);
+			}
+
 			logger.error("Incremental sync failed", error);
 			this.onStatusChange({
 				state: "error",
@@ -719,6 +800,48 @@ export class SyncService {
 				this.refreshQueuedStatus();
 			}
 		}
+	}
+
+	private takePendingSyncPaths() {
+		if (this.syncQueueTimer !== null) {
+			window.clearTimeout(this.syncQueueTimer);
+			this.syncQueueTimer = null;
+		}
+
+		const paths = Array.from(this.pendingSyncPaths);
+		this.pendingSyncPaths.clear();
+		return paths;
+	}
+
+	private async syncFilePaths(paths: string[]): Promise<LocalSyncResult> {
+		let saved = 0;
+		let skipped = 0;
+
+		for (const [index, path] of paths.entries()) {
+			const abstractFile = this.app.vault.getAbstractFileByPath(path);
+
+			if (abstractFile instanceof TFile && this.isFileInsideCurrentSyncFolder(abstractFile)) {
+				if (await this.syncFileIfChanged(abstractFile)) {
+					saved += 1;
+				} else {
+					skipped += 1;
+				}
+			}
+
+			this.onStatusChange({
+				state: "syncing",
+				current: index + 1,
+				total: paths.length,
+				saved,
+				skipped
+			});
+		}
+
+		return {
+			total: paths.length,
+			saved,
+			skipped
+		};
 	}
 
 	private refreshQueuedStatus() {
@@ -771,8 +894,37 @@ export class SyncService {
 			hasContent: typeof record.content === "string",
 			hasAttachments: typeof record._attachments === "object"
 		});
+
 		return this.store.saveFileRecordIfChanged(record);
 	}
+}
+
+function getPendingPushBlockingState(
+	hasLocalSyncBaseline: boolean,
+	hasRemoteBaseline: boolean
+): { statusMessage: string; noticeMessage: string } | null {
+	if (!hasLocalSyncBaseline && !hasRemoteBaseline) {
+		return {
+			statusMessage: "Local and remote baselines required",
+			noticeMessage: "Run a full local sync and establish the remote baseline with a full push or pull before pushing pending changes."
+		};
+	}
+
+	if (!hasLocalSyncBaseline) {
+		return {
+			statusMessage: "Full local sync required",
+			noticeMessage: "Run Sync now before pushing pending changes."
+		};
+	}
+
+	if (!hasRemoteBaseline) {
+		return {
+			statusMessage: "Remote baseline required",
+			noticeMessage: "Run a full push or pull before pushing pending changes."
+		};
+	}
+
+	return null;
 }
 
 function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing") {
