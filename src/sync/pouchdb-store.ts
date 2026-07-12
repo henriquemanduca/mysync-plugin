@@ -20,6 +20,11 @@ export interface RemotePullResult {
 	docsRead: number;
 }
 
+export interface DeletedFileRecordIdsResult {
+	deletedRecordIds: string[];
+	conflictedRecordIds: string[];
+}
+
 export interface RemotePushOptions {
 	docIds?: string[];
 	pendingChangesOnly?: boolean;
@@ -420,12 +425,16 @@ export class PouchDbFileStore {
 
 	async listDeletedFileRecordIds(recordIds: string[]) {
 		if (recordIds.length === 0) {
-			return [];
+			return {
+				deletedRecordIds: [],
+				conflictedRecordIds: []
+			};
 		}
 
 		return this.runWithLocalDb("listDeletedFileRecordIds", async (fileDb) => {
 			const uniqueRecordIds = Array.from(new Set(recordIds));
 			const deletedRecordIds = new Set<string>();
+			const conflictedRecordIds = new Set<string>();
 
 			await Promise.all(uniqueRecordIds.map(async (recordId) => {
 				if (!recordId.startsWith("vault-file:")) {
@@ -435,12 +444,21 @@ export class PouchDbFileStore {
 				try {
 					const revisions = await (fileDb as PouchDbOpenRevisions<VaultFileRecord>)
 						.get(recordId, { open_revs: "all" });
+					let hasDeletedLeaf = false;
+					let hasLiveLeaf = false;
 
 					for (const revision of revisions) {
 						if ("ok" in revision && "_deleted" in revision.ok && revision.ok._deleted) {
-							deletedRecordIds.add(recordId);
-							return;
+							hasDeletedLeaf = true;
+						} else if ("ok" in revision) {
+							hasLiveLeaf = true;
 						}
+					}
+
+					if (hasDeletedLeaf && hasLiveLeaf) {
+						conflictedRecordIds.add(recordId);
+					} else if (hasDeletedLeaf) {
+						deletedRecordIds.add(recordId);
 					}
 				} catch (error) {
 					if (!isPouchNotFound(error)) {
@@ -449,7 +467,10 @@ export class PouchDbFileStore {
 				}
 			}));
 
-			return Array.from(deletedRecordIds);
+			return {
+				deletedRecordIds: Array.from(deletedRecordIds),
+				conflictedRecordIds: Array.from(conflictedRecordIds)
+			};
 		});
 	}
 

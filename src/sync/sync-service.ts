@@ -349,11 +349,18 @@ export class SyncService {
 				])
 			);
 
-			const deletedRecordIds = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
+			const deletedFileRecords = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
+			const deletedRecordIds = deletedFileRecords.deletedRecordIds;
+			const conflictedRecordIds = deletedFileRecords.conflictedRecordIds;
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
-			const restoreResult = await this.restoreVaultFiles(new Set(deletedRecordIds));
+			const restoreResult = await this.restoreVaultFiles(
+				new Set([
+					...deletedRecordIds,
+					...conflictedRecordIds
+				])
+			);
 			const skipped = restoreResult.skipped + deletionResult.skipped;
-			const conflicts = restoreResult.conflicts + deletionResult.conflicts;
+			const conflicts = restoreResult.conflicts + deletionResult.conflicts + conflictedRecordIds.length;
 
 			this.onStatusChange({
 				state: "pulled",
@@ -628,7 +635,14 @@ export class SyncService {
 
 	private async restoreVaultFile(record: VaultFileRecord): Promise<"restored" | "skipped" | "conflict"> {
 		const path = normalizeRestoredPath(record.path);
-		if (!path || record.type !== "vault-file" || isSyncBlacklistedPath(path)) {
+		const syncFolder = this.getCurrentSyncFolder();
+
+		if (
+			!path
+			|| record.type !== "vault-file"
+			|| isSyncBlacklistedPath(path)
+			|| !isPathInsideSyncFolder(path, syncFolder)
+		) {
 			return "skipped";
 		}
 
