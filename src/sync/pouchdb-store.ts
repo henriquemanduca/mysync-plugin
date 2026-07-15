@@ -1,6 +1,6 @@
 import { requestUrl } from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
-import type { VaultFileRecord } from "./types";
+import type { ConflictResolutionStrategy, VaultFileRecord } from "./types";
 import { createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath } from "./vault-files";
 import { Logger } from "../utils/logger";
 import { isPouchNotFound } from "../utils/pouchdb-errors";
@@ -20,14 +20,21 @@ export interface RemotePullResult {
 	docsRead: number;
 }
 
-export interface DeletedFileRecordIdsResult {
-	deletedRecordIds: string[];
-	conflictedRecordIds: string[];
-}
-
 export interface RemotePushOptions {
 	docIds?: string[];
 	pendingChangesOnly?: boolean;
+}
+
+export interface FileRevisionLeaf {
+	revision: string;
+	deleted: boolean;
+	record?: VaultFileRecord & PouchDB.ExistingDocument;
+}
+
+export interface FileRevisionState {
+	recordId: string;
+	winningRevision?: string;
+	leaves: FileRevisionLeaf[];
 }
 
 const logger = new Logger("PouchDbFileStore");
@@ -40,8 +47,11 @@ type OpenRevision<T extends { _id: string }> =
 	| { ok: (T & PouchDB.ExistingDocument) | (PouchDB.ExistingDocument & { _deleted: true }) }
 	| { missing: string };
 
-type PouchDbOpenRevisions<T extends { _id: string }> = PouchDB.Database<T> & {
-	get(id: string, options: { open_revs: "all" }): Promise<Array<OpenRevision<T>>>;
+type PouchDbOpenRevisions<T extends { _id: string }> = {
+	get(
+		id: string,
+		options: { open_revs: "all"; attachments?: boolean; binary?: boolean }
+	): Promise<Array<OpenRevision<T>>>;
 };
 
 interface RemoteBaselineDocument {
@@ -92,6 +102,9 @@ export class PouchDbFileStore {
 				}
 
 				await fileDb.put({
+					...(existing.conflictResolution
+						? { conflictResolution: existing.conflictResolution }
+						: {}),
 					...record,
 					_rev: existing._rev
 				});
@@ -381,6 +394,110 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async listAllFileRecordIds() {
+		return this.runWithLocalDb("listAllFileRecordIds", async (fileDb) => {
+			const changes = await fileDb.changes({
+				since: 0,
+				style: "all_docs"
+			});
+
+			return Array.from(new Set(
+				changes.results
+					.map((change) => change.id)
+					.filter(isSyncableFileRecordId)
+			));
+		});
+	}
+
+	async listFileRevisionStates(recordIds: string[]) {
+		return this.runWithLocalDb("listFileRevisionStates", async (fileDb) => {
+			return Promise.all(Array.from(new Set(recordIds)).map(
+				(recordId) => this.getFileRevisionStateFromDb(fileDb, recordId)
+			));
+		});
+	}
+
+	async getFileRevision(recordId: string, revision: string) {
+		return this.runWithLocalDb("getFileRevision", async (fileDb) => {
+			const document = await fileDb.get(recordId, {
+				rev: revision,
+				attachments: true,
+				binary: true
+			}) as (VaultFileRecord & PouchDB.ExistingDocument & { _deleted?: boolean });
+
+			return document._deleted ? null : document;
+		});
+	}
+
+	async resolveFileRecordWithContent(
+		recordId: string,
+		sourceRecord: VaultFileRecord,
+		resolvedBy: string,
+		strategy: ConflictResolutionStrategy
+	) {
+		return this.runWithLocalDb("resolveFileRecordWithContent", async (fileDb) => {
+			const state = await this.getFileRevisionStateFromDb(fileDb, recordId);
+			const winningRevision = state.winningRevision;
+
+			if (!winningRevision) {
+				throw new Error(`Cannot resolve ${recordId}: winning revision not found.`);
+			}
+
+			const source = sourceRecord as VaultFileRecord & { _rev?: string; _deleted?: boolean };
+			const { _rev: ignoredRevision, _deleted: ignoredDeletion, ...recordBody } = source;
+			void ignoredRevision;
+			void ignoredDeletion;
+
+			await fileDb.put({
+				...recordBody,
+				_id: recordId,
+				_rev: winningRevision,
+				conflictResolution: undefined
+			} as VaultFileRecord & { _rev: string });
+
+			for (const leaf of state.leaves) {
+				if (!leaf.deleted && leaf.revision !== winningRevision) {
+					await fileDb.remove({
+						_id: recordId,
+						_rev: leaf.revision
+					});
+				}
+			}
+
+			const prunedState = await this.getFileRevisionStateFromDb(fileDb, recordId);
+			const acknowledgedDeletedLeafRevisions = prunedState.leaves
+				.filter((leaf) => leaf.deleted)
+				.map((leaf) => leaf.revision)
+				.sort();
+			const canonical = await fileDb.get(recordId);
+
+			await fileDb.put({
+				...canonical,
+				conflictResolution: {
+					acknowledgedDeletedLeafRevisions,
+					resolvedAt: new Date().toISOString(),
+					resolvedBy,
+					strategy
+				}
+			});
+		});
+	}
+
+	async resolveFileRecordAsDeleted(recordId: string) {
+		return this.runWithLocalDb("resolveFileRecordAsDeleted", async (fileDb) => {
+			const state = await this.getFileRevisionStateFromDb(fileDb, recordId);
+
+			for (const leaf of state.leaves) {
+				if (!leaf.deleted) {
+					await fileDb.remove({
+						_id: recordId,
+						_rev: leaf.revision
+					});
+				}
+			}
+		});
+	}
+
 	async listSyncableFileRecordIds() {
 		logger.debug("List syncable file record ids requested");
 		const records = await this.listFileRecords();
@@ -423,55 +540,54 @@ export class PouchDbFileStore {
 		);
 	}
 
-	async listDeletedFileRecordIds(recordIds: string[]) {
-		if (recordIds.length === 0) {
-			return {
-				deletedRecordIds: [],
-				conflictedRecordIds: []
-			};
+	private async getFileRevisionStateFromDb(
+		fileDb: PouchDB<VaultFileRecord>,
+		recordId: string
+	): Promise<FileRevisionState> {
+		if (!isSyncableFileRecordId(recordId)) {
+			return { recordId, leaves: [] };
 		}
 
-		return this.runWithLocalDb("listDeletedFileRecordIds", async (fileDb) => {
-			const uniqueRecordIds = Array.from(new Set(recordIds));
-			const deletedRecordIds = new Set<string>();
-			const conflictedRecordIds = new Set<string>();
-
-			await Promise.all(uniqueRecordIds.map(async (recordId) => {
-				if (!recordId.startsWith("vault-file:")) {
-					return;
+		const [allDocs, revisions] = await Promise.all([
+			fileDb.allDocs({ keys: [recordId] }),
+			(fileDb as PouchDbOpenRevisions<VaultFileRecord>).get(recordId, {
+				open_revs: "all"
+			}).catch((error: unknown) => {
+				if (isPouchNotFound(error)) {
+					return [] as Array<OpenRevision<VaultFileRecord>>;
 				}
 
-				try {
-					const revisions = await (fileDb as PouchDbOpenRevisions<VaultFileRecord>)
-						.get(recordId, { open_revs: "all" });
-					let hasDeletedLeaf = false;
-					let hasLiveLeaf = false;
+				throw error;
+			})
+		]);
 
-					for (const revision of revisions) {
-						if ("ok" in revision && "_deleted" in revision.ok && revision.ok._deleted) {
-							hasDeletedLeaf = true;
-						} else if ("ok" in revision) {
-							hasLiveLeaf = true;
-						}
-					}
+		const winningRevision = allDocs.rows[0]?.value?.rev;
+		const leaves = revisions.flatMap((revision): FileRevisionLeaf[] => {
+			if (!("ok" in revision)) {
+				return [];
+			}
 
-					if (hasDeletedLeaf && hasLiveLeaf) {
-						conflictedRecordIds.add(recordId);
-					} else if (hasDeletedLeaf) {
-						deletedRecordIds.add(recordId);
-					}
-				} catch (error) {
-					if (!isPouchNotFound(error)) {
-						throw error;
-					}
-				}
-			}));
+			const document = revision.ok as VaultFileRecord & PouchDB.ExistingDocument & { _deleted?: boolean };
 
-			return {
-				deletedRecordIds: Array.from(deletedRecordIds),
-				conflictedRecordIds: Array.from(conflictedRecordIds)
-			};
+			if (document._deleted) {
+				return [{
+					revision: document._rev,
+					deleted: true
+				}];
+			}
+
+			return [{
+				revision: document._rev,
+				deleted: false,
+				record: document
+			}];
 		});
+
+		return {
+			recordId,
+			winningRevision,
+			leaves
+		};
 	}
 
 	async testCouchDbConnection(connection: CouchDbConnection) {

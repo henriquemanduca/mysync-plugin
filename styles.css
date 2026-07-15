@@ -1,5 +1,10 @@
 .mysync-status {
 	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.mysync-status-has-conflicts {
+	color: var(--text-warning);
 }
 
 .mysync-settings-section {
@@ -10,4 +15,13 @@
 	color: var(--text-muted);
 	background-color: var(--background-secondary);
 	cursor: text;
+}
+
+.mysync-conflict-path {
+	font-weight: var(--font-semibold);
+	overflow-wrap: anywhere;
+}
+
+.mysync-conflict-error {
+	color: var(--text-error);
 }

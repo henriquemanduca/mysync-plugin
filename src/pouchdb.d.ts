@@ -5,6 +5,12 @@ declare module "pouchdb" {
 			_rev: string;
 		}
 
+		interface PutResponse {
+			ok: boolean;
+			id: string;
+			rev: string;
+		}
+
 		interface AuthOptions {
 			username: string;
 			password: string;
@@ -71,6 +77,31 @@ declare module "pouchdb" {
 			rows: Array<AllDocsRow<T>>;
 		}
 
+		interface ChangesOptions {
+			since?: string | number;
+			style?: "all_docs" | "main_only";
+			include_docs?: boolean;
+		}
+
+		interface ChangesResult {
+			id: string;
+			changes: Array<{ rev: string }>;
+			deleted?: boolean;
+		}
+
+		interface ChangesResponse {
+			results: ChangesResult[];
+			last_seq: string | number;
+			pending?: number;
+		}
+
+		interface GetOptions {
+			rev?: string;
+			open_revs?: "all" | string[];
+			attachments?: boolean;
+			binary?: boolean;
+		}
+
 		interface DatabaseInfo {
 			db_name: string;
 			doc_count?: number;
@@ -82,10 +113,12 @@ declare module "pouchdb" {
 
 		interface Database<T extends { _id: string }> {
 			replicate: ReplicationMethods<T>;
-			put(doc: T | (T & { _rev: string })): Promise<unknown>;
+			put(doc: T | (T & { _rev: string })): Promise<PutResponse>;
 			get(id: string): Promise<T & ExistingDocument>;
+			get(id: string, options: GetOptions): Promise<unknown>;
 			remove(doc: ExistingDocument): Promise<unknown>;
 			allDocs(options?: AllDocsOptions): Promise<AllDocsResponse<T>>;
+			changes(options?: ChangesOptions): Promise<ChangesResponse>;
 			info(): Promise<DatabaseInfo>;
 			close(): Promise<void>;
 			destroy(): Promise<unknown>;
@@ -96,10 +129,12 @@ declare module "pouchdb" {
 		constructor(name: string);
 		constructor(name: string, options?: { auth?: PouchDB.AuthOptions });
 		replicate: PouchDB.ReplicationMethods<T>;
-		put(doc: T | (T & { _rev: string })): Promise<unknown>;
+		put(doc: T | (T & { _rev: string })): Promise<PouchDB.PutResponse>;
 		get(id: string): Promise<T & PouchDB.ExistingDocument>;
+		get(id: string, options: PouchDB.GetOptions): Promise<unknown>;
 		remove(doc: PouchDB.ExistingDocument): Promise<unknown>;
 		allDocs(options?: PouchDB.AllDocsOptions): Promise<PouchDB.AllDocsResponse<T>>;
+		changes(options?: PouchDB.ChangesOptions): Promise<PouchDB.ChangesResponse>;
 		info(): Promise<PouchDB.DatabaseInfo>;
 		close(): Promise<void>;
 		destroy(): Promise<unknown>;
