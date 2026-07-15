@@ -8,6 +8,7 @@ export type SyncFolderMode = "vault-root" | "custom";
 
 export interface MySyncSettings {
 	localVaultId: string;
+	localConflictDatabase: string;
 	syncFolderMode: SyncFolderMode;
 	customSyncFolder: string;
 	couchDbUrl: string;
@@ -22,6 +23,7 @@ export interface MySyncSettings {
 
 export const DEFAULT_SETTINGS: MySyncSettings = {
 	localVaultId: "",
+	localConflictDatabase: "",
 	syncFolderMode: "vault-root",
 	customSyncFolder: "",
 	couchDbUrl: "",
@@ -67,13 +69,24 @@ export class MySyncSettingTab extends PluginSettingTab {
 				cls: "mysync-settings-section",
 				items: [
 					{
-						name: "Local vault ID",
-						desc: "Automatically generated identifier for this vault.",
+						name: "Local file database",
+						desc: "Automatically created database for files in this vault.",
 						render: (setting) => {
 							setting.addText((text) => {
 								text.inputEl.readOnly = true;
 								text.inputEl.addClass("mysync-readonly-setting");
 								text.setValue(`mysync-files-${this.plugin.settings.localVaultId}`);
+							});
+						}
+					},
+					{
+						name: "Local conflict database",
+						desc: "Automatically created database for unresolved conflicts.",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.readOnly = true;
+								text.inputEl.addClass("mysync-readonly-setting");
+								text.setValue(this.plugin.settings.localConflictDatabase);
 							});
 						}
 					},
@@ -262,12 +275,21 @@ export class MySyncSettingTab extends PluginSettingTab {
 		const remoteSectionEl = this.createLegacySection("Remote database");
 
 		new Setting(localSectionEl)
-			.setName("Local vault ID")
-			.setDesc("Automatically generated identifier for this vault.")
+			.setName("Local file database")
+			.setDesc("Automatically created database for files in this vault.")
 			.addText((text) => {
 				text.inputEl.readOnly = true;
 				text.inputEl.addClass("mysync-readonly-setting");
 				text.setValue(`mysync-files-${this.plugin.settings.localVaultId}`);
+			});
+
+		new Setting(localSectionEl)
+			.setName("Local conflict database")
+			.setDesc("Automatically created database for unresolved conflicts.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(this.plugin.settings.localConflictDatabase);
 			});
 
 		new Setting(localSectionEl)

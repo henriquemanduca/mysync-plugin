@@ -1,7 +1,10 @@
-import { Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "./settings";
 import { PouchDbFileStore } from "./sync/pouchdb-store";
+import { PouchDbConflictStore } from "./sync/conflict-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
+import type { SyncConflict } from "./sync/types";
+import { ConflictResolutionModal } from "./conflict-resolution-modal";
 import { formatDateTime } from "./utils/date-format";
 import { isLoggerLevel, Logger } from "./utils/logger";
 import { isAndroidApp } from "./utils/platform";
@@ -12,6 +15,7 @@ const IDLE_STATUS_DELAY_MS = 5000;
 const ANDROID_NOMEDIA_PATH = ".nomedia";
 const STRING_SETTING_KEYS = [
 	"localVaultId",
+	"localConflictDatabase",
 	"customSyncFolder",
 	"couchDbUrl",
 	"couchDbDatabase",
@@ -33,6 +37,9 @@ export default class MySyncPlugin extends Plugin {
 	private syncService!: SyncService;
 	private statusBarEl!: HTMLElement;
 	private idleStatusTimer: number | null = null;
+	private activeConflictCount = 0;
+	private currentSyncStatus: SyncStatus = { state: "idle" };
+	private conflictModal: ConflictResolutionModal | null = null;
 
 	async onload() {
 		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
@@ -40,16 +47,21 @@ export default class MySyncPlugin extends Plugin {
 		await this.ensureAndroidNoMediaFile();
 
 		this.statusBarEl = this.addStatusBarItem();
+		this.statusBarEl.addEventListener("click", () => void this.openConflictModal());
 		this.updateSyncStatus({ state: "idle" });
 
 		const fileStore = new PouchDbFileStore(createLocalDatabaseName(this.settings.localVaultId));
+		const conflictStore = new PouchDbConflictStore(this.settings.localConflictDatabase);
 		this.syncService = new SyncService(
 			this.app,
 			fileStore,
+			conflictStore,
 			() => this.settings,
 			(status) => this.updateSyncStatus(status),
-			(operation) => this.saveCompletedSyncOperation(operation)
+			(operation) => this.saveCompletedSyncOperation(operation),
+			(conflicts) => this.handleConflictsChanged(conflicts)
 		);
+		await this.syncService.initialize();
 
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
 			// await this.syncService.syncNow();
@@ -85,6 +97,14 @@ export default class MySyncPlugin extends Plugin {
 			name: "Pull from remote",
 			callback: () => {
 				void this.syncService.pullFromCouchDb();
+			}
+		});
+
+		this.addCommand({
+			id: "review-sync-conflicts",
+			name: "Resolve sync conflicts",
+			callback: () => {
+				void this.openConflictModal();
 			}
 		});
 
@@ -128,6 +148,7 @@ export default class MySyncPlugin extends Plugin {
 
 	onunload() {
 		this.clearIdleStatusTimer();
+		this.conflictModal?.close();
 		this.syncService.close();
 		void Logger.flush();
 		// Obsidian automatically disposes registered events, commands, and intervals.
@@ -137,9 +158,22 @@ export default class MySyncPlugin extends Plugin {
 		const savedSettings = normalizeSavedSettings((await this.loadData()) as unknown);
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, savedSettings);
 		Logger.setLevel(this.settings.logLevel);
+		let settingsChanged = false;
 
 		if (!this.settings.localVaultId) {
 			this.settings.localVaultId = createLocalVaultId();
+			settingsChanged = true;
+		}
+
+		const localDatabaseName = createLocalDatabaseName(this.settings.localVaultId);
+		const expectedConflictDatabase = createConflictDatabaseName(localDatabaseName);
+
+		if (this.settings.localConflictDatabase !== expectedConflictDatabase) {
+			this.settings.localConflictDatabase = expectedConflictDatabase;
+			settingsChanged = true;
+		}
+
+		if (settingsChanged) {
 			await this.saveSettings();
 		}
 	}
@@ -172,17 +206,61 @@ export default class MySyncPlugin extends Plugin {
 	}
 
 	private updateSyncStatus(status: SyncStatus) {
+		this.currentSyncStatus = status;
 		this.clearIdleStatusTimer();
 		this.statusBarEl.empty();
 		this.statusBarEl.addClass("mysync-status");
 
 		const view = createSyncStatusView(status, this.settings);
-		this.statusBarEl.setText(view.text);
-		this.statusBarEl.title = view.title;
+		const conflictSuffix = this.activeConflictCount > 0
+			? ` · ${this.activeConflictCount} conflict${this.activeConflictCount === 1 ? "" : "s"}`
+			: "";
+		this.statusBarEl.setText(`${view.text}${conflictSuffix}`);
+		this.statusBarEl.title = `${view.title}${conflictSuffix}`;
+		this.statusBarEl.toggleClass("mysync-status-has-conflicts", this.activeConflictCount > 0);
 
 		if (view.returnToIdle) {
 			this.scheduleIdleStatus();
 		}
+	}
+
+	private handleConflictsChanged(conflicts: SyncConflict[]) {
+		const previousCount = this.activeConflictCount;
+		this.activeConflictCount = conflicts.length;
+		this.updateSyncStatus(this.currentSyncStatus);
+
+		this.conflictModal?.updateConflicts(conflicts);
+
+		if (conflicts.length > previousCount) {
+			window.setTimeout(() => {
+				void this.openConflictModal();
+			}, 250);
+		}
+	}
+
+	private async openConflictModal() {
+		const conflicts = await this.syncService.listActiveConflicts();
+
+		if (conflicts.length === 0) {
+			new Notice("There are no unresolved sync conflicts.");
+			return;
+		}
+
+		if (this.conflictModal) {
+			this.conflictModal.updateConflicts(conflicts);
+			return;
+		}
+
+		this.conflictModal = new ConflictResolutionModal(
+			this.app,
+			conflicts,
+			(conflictId, strategy) => this.syncService.resolveConflict(conflictId, strategy),
+			(conflictId) => this.syncService.retryConflictPush(conflictId),
+			() => {
+				this.conflictModal = null;
+			}
+		);
+		this.conflictModal.open();
 	}
 
 	private scheduleIdleStatus() {
@@ -242,6 +320,16 @@ function createLocalVaultId() {
 
 function createLocalDatabaseName(localVaultId: string) {
 	return `mysync-files-${localVaultId}`;
+}
+
+function createConflictDatabaseName(localDatabaseName: string) {
+	const localDatabasePrefix = "mysync-files-";
+
+	if (localDatabaseName.startsWith(localDatabasePrefix)) {
+		return `mysync-conflicts-${localDatabaseName.slice(localDatabasePrefix.length)}`;
+	}
+
+	return `${localDatabaseName}-conflicts`;
 }
 
 function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {

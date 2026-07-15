@@ -1,7 +1,18 @@
 import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
 import type { MySyncSettings } from "../settings";
-import type { CouchDbConnection, PouchDbFileStore } from "./pouchdb-store";
-import type { VaultFileRecord } from "./types";
+import type {
+	CouchDbConnection,
+	FileRevisionState,
+	PouchDbFileStore
+} from "./pouchdb-store";
+import type { PouchDbConflictStore } from "./conflict-store";
+import type {
+	ConflictResolutionStrategy,
+	SyncConflict,
+	SyncConflictKind,
+	SyncConflictLocalVariant,
+	VaultFileRecord
+} from "./types";
 import {
 	collectSyncableFilesInFolder,
 	createBinaryContentHash,
@@ -39,6 +50,11 @@ interface RemoteDeletionResult {
 	conflicts: number;
 }
 
+interface PullClassification {
+	deletedRecordIds: string[];
+	conflictedRecordIds: Set<string>;
+}
+
 export type SyncStatus =
 	| { state: "idle" }
 	| { state: "queued"; pending: number }
@@ -62,16 +78,353 @@ export class SyncService {
 	private syncInProgress = false;
 	private pendingSyncPaths = new Set<string>();
 	private syncQueueTimer: number | null = null;
-	private applyingRemoteDeletion = false;
+	private applyingRemoteChange = false;
+	private conflictedPaths = new Set<string>();
 
 	constructor(
 		private app: App,
 		private store: PouchDbFileStore,
+		private conflictStore: PouchDbConflictStore,
 		private getSettings: () => MySyncSettings,
 		private onStatusChange: (status: SyncStatus) => void,
-		private onOperationCompleted: (operation: CompletedSyncOperation) => Promise<void>
+		private onOperationCompleted: (operation: CompletedSyncOperation) => Promise<void>,
+		private onConflictsChanged: (conflicts: SyncConflict[]) => void
 	) {
 		this.onStatusChange({ state: "idle" });
+	}
+
+	async initialize() {
+		await this.conflictStore.ensureDatabaseExists();
+		await this.refreshActiveConflicts();
+	}
+
+	async listActiveConflicts() {
+		return this.conflictStore.listActiveConflicts();
+	}
+
+	async resolveConflict(
+		conflictId: string,
+		strategy: ConflictResolutionStrategy,
+		selectedRevision?: string
+	) {
+		if (this.isRunning()) return;
+
+		const settings = this.getSettings();
+		const validationMessage = validateCouchDbSettings(settings, "resolving conflicts");
+
+		if (validationMessage) {
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+		let resolutionApplied = false;
+
+		try {
+			const conflict = await this.conflictStore.getConflict(conflictId);
+
+			if (!conflict || conflict.status === "resolved") {
+				throw new Error("Conflict is no longer available.");
+			}
+
+			await this.conflictStore.updateConflict(conflictId, (current) => ({
+				...current,
+				status: "resolving",
+				error: undefined
+			}));
+
+			const [currentState] = await this.store.listFileRevisionStates([conflict.recordId]);
+			const currentRevisions = currentState?.leaves.map((leaf) => leaf.revision).sort() ?? [];
+
+			if (!arraysEqual(currentRevisions, conflict.observedLeafRevisions)) {
+				await this.conflictStore.updateConflict(conflictId, (current) => ({
+					...current,
+					status: "stale",
+					error: "The revision tree changed. Pull again before resolving this conflict."
+				}));
+				throw new Error("The conflict changed. Pull again to refresh it.");
+			}
+
+			const resolvedDocumentIds = await this.applyConflictResolution(
+				conflict,
+				strategy,
+				selectedRevision
+			);
+			resolutionApplied = true;
+			const resolvedAt = new Date().toISOString();
+
+			await this.conflictStore.updateConflict(conflictId, (current) => ({
+				...current,
+				status: "pending-push",
+				resolution: {
+					strategy,
+					selectedRevision,
+					resolvedDocumentIds,
+					resolvedAt
+				},
+				error: undefined
+			}));
+
+			await this.pushResolvedConflict(createCouchDbConnection(settings), resolvedDocumentIds);
+			await this.conflictStore.updateConflict(conflictId, (current) => ({
+				...current,
+				status: "resolved",
+				error: undefined
+			}));
+			await this.refreshActiveConflicts();
+			new Notice(`Resolved conflict for ${conflict.path}.`);
+		} catch (error) {
+			logger.error("Conflict resolution failed", error, { conflictId, strategy });
+
+			try {
+				if (resolutionApplied) {
+					await this.conflictStore.updateConflict(conflictId, (current) => ({
+						...current,
+						status: "pending-push",
+						error: getErrorMessage(error, "Failed to push conflict resolution.")
+					}));
+				} else {
+					await this.conflictStore.updateConflict(conflictId, (current) => ({
+						...current,
+						status: current.status === "stale" ? "stale" : "error",
+						error: getErrorMessage(error, "Conflict resolution failed.")
+					}));
+				}
+			} catch (updateError) {
+				logger.error("Failed to persist conflict resolution error", updateError, { conflictId });
+			}
+
+			await this.refreshActiveConflicts();
+			new Notice(getErrorMessage(error, "Conflict resolution failed."));
+		} finally {
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+		}
+	}
+
+	async retryConflictPush(conflictId: string) {
+		if (this.isRunning()) return;
+
+		const conflict = await this.conflictStore.getConflict(conflictId);
+
+		if (!conflict?.resolution || conflict.status !== "pending-push") {
+			new Notice("This conflict has no resolution waiting to be pushed.");
+			return;
+		}
+
+		const settings = this.getSettings();
+		const validationMessage = validateCouchDbSettings(settings, "pushing the resolution");
+
+		if (validationMessage) {
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+
+		try {
+			await this.pushResolvedConflict(
+				createCouchDbConnection(settings),
+				conflict.resolution.resolvedDocumentIds
+			);
+			await this.conflictStore.updateConflict(conflictId, (current) => ({
+				...current,
+				status: "resolved",
+				error: undefined
+			}));
+			await this.refreshActiveConflicts();
+			new Notice(`Pushed conflict resolution for ${conflict.path}.`);
+		} catch (error) {
+			logger.error("Conflict resolution push retry failed", error, { conflictId });
+			await this.conflictStore.updateConflict(conflictId, (current) => ({
+				...current,
+				error: getErrorMessage(error, "Failed to push conflict resolution.")
+			}));
+			new Notice(getErrorMessage(error, "Failed to push conflict resolution."));
+		} finally {
+			this.syncInProgress = false;
+		}
+	}
+
+	private async applyConflictResolution(
+		conflict: SyncConflict,
+		strategy: ConflictResolutionStrategy,
+		selectedRevision?: string
+	) {
+		this.applyingRemoteChange = true;
+
+		try {
+			if (strategy === "delete") {
+				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
+
+				if (existing instanceof TFile) {
+					await this.app.fileManager.trashFile(existing);
+				} else if (existing) {
+					throw new Error(`Cannot delete ${conflict.path}: the path is not a file.`);
+				}
+
+				await this.store.resolveFileRecordAsDeleted(conflict.recordId);
+				return [conflict.recordId];
+			}
+
+			if (strategy === "keep-local") {
+				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
+
+				if (!(existing instanceof TFile)) {
+					throw new Error(`Local file not found: ${conflict.path}`);
+				}
+
+				const localRecord = await createFileRecord(this.app, existing);
+				await this.store.resolveFileRecordWithContent(
+					conflict.recordId,
+					localRecord,
+					this.getSettings().localVaultId,
+					strategy
+				);
+				return [conflict.recordId];
+			}
+
+			const remoteRevision = selectedRevision
+				?? conflict.remoteVariants.find((variant) => variant.winning && !variant.deleted)?.revision
+				?? conflict.remoteVariants.find((variant) => !variant.deleted)?.revision;
+
+			if (!remoteRevision) {
+				throw new Error("No live revision is available for this resolution.");
+			}
+
+			const remoteRecord = await this.store.getFileRevision(conflict.recordId, remoteRevision);
+
+			if (!remoteRecord) {
+				throw new Error("The selected remote revision is no longer available.");
+			}
+
+			if (strategy === "keep-both") {
+				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
+
+				if (!(existing instanceof TFile)) {
+					throw new Error("Keep both requires an existing local file.");
+				}
+
+				const localRecord = await createFileRecord(this.app, existing);
+				const copyPath = this.createConflictCopyPath(conflict.path);
+				await this.writeRecordToVault(remoteRecord, copyPath);
+				const copyFile = this.app.vault.getAbstractFileByPath(copyPath);
+
+				if (!(copyFile instanceof TFile)) {
+					throw new Error(`Failed to create conflict copy: ${copyPath}`);
+				}
+
+				const copyRecord = await createFileRecord(this.app, copyFile);
+				await this.store.saveFileRecordIfChanged(copyRecord);
+				await this.store.resolveFileRecordWithContent(
+					conflict.recordId,
+					localRecord,
+					this.getSettings().localVaultId,
+					strategy
+				);
+				return [conflict.recordId, copyRecord._id];
+			}
+
+			await this.writeRecordToVault(remoteRecord, conflict.path);
+			await this.store.resolveFileRecordWithContent(
+				conflict.recordId,
+				remoteRecord,
+				this.getSettings().localVaultId,
+				strategy
+			);
+			return [conflict.recordId];
+		} finally {
+			this.applyingRemoteChange = false;
+		}
+	}
+
+	private async pushResolvedConflict(connection: CouchDbConnection, documentIds: string[]) {
+		await this.store.pushToCouchDb(
+			connection,
+			(docsWritten) => this.onStatusChange({ state: "pushing", docsWritten }),
+			{ docIds: documentIds }
+		);
+	}
+
+	private async writeRecordToVault(record: VaultFileRecord, path: string) {
+		const existing = this.app.vault.getAbstractFileByPath(path);
+
+		if (existing && !(existing instanceof TFile)) {
+			throw new Error(`Cannot restore ${path}: the path is not a file.`);
+		}
+
+		if (!existing) {
+			const folderStatus = await this.ensureParentFolders(path);
+
+			if (folderStatus === "conflict") {
+				throw new Error(`Cannot restore ${path}: a parent path is a file.`);
+			}
+		}
+
+		const isText = record.fileType === "markdown" && typeof record.content === "string";
+
+		if (existing instanceof TFile) {
+			if (isText) {
+				await this.app.vault.modify(existing, record.content!);
+				return;
+			}
+
+			const data = await getAttachmentArrayBuffer(record);
+
+			if (!data) {
+				throw new Error(`Binary content is unavailable for ${path}.`);
+			}
+
+			await this.app.vault.modifyBinary(existing, data);
+			return;
+		}
+
+		if (isText) {
+			await this.app.vault.create(path, record.content!);
+			return;
+		}
+
+		const data = await getAttachmentArrayBuffer(record);
+
+		if (!data) {
+			throw new Error(`Binary content is unavailable for ${path}.`);
+		}
+
+		await this.app.vault.createBinary(path, data);
+	}
+
+	private createConflictCopyPath(path: string) {
+		const slashIndex = path.lastIndexOf("/");
+		const folder = slashIndex >= 0 ? path.slice(0, slashIndex + 1) : "";
+		const fileName = slashIndex >= 0 ? path.slice(slashIndex + 1) : path;
+		const dotIndex = fileName.lastIndexOf(".");
+		const baseName = dotIndex > 0 ? fileName.slice(0, dotIndex) : fileName;
+		const extension = dotIndex > 0 ? fileName.slice(dotIndex) : "";
+		const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+		const candidateBase = `${folder}${baseName} conflict-${timestamp}`;
+		let candidate = `${candidateBase}${extension}`;
+		let suffix = 2;
+
+		while (this.app.vault.getAbstractFileByPath(candidate)) {
+			candidate = `${candidateBase} ${suffix}${extension}`;
+			suffix += 1;
+		}
+
+		return candidate;
+	}
+
+	private async refreshActiveConflicts() {
+		const conflicts = await this.conflictStore.listActiveConflicts();
+		this.conflictedPaths = new Set(conflicts.map((conflict) => conflict.path));
+		this.onConflictsChanged(conflicts);
+	}
+
+	private blockPushForConflicts() {
+		this.onStatusChange({
+			state: "error",
+			message: "Resolve sync conflicts before pushing"
+		});
+		new Notice(`Resolve ${this.conflictedPaths.size} MySync conflict(s) before pushing.`);
 	}
 
 	isRunning(): boolean {
@@ -130,6 +483,11 @@ export class SyncService {
 				message: validationMessage
 			});
 			new Notice(validationMessage);
+			return;
+		}
+
+		if (this.conflictedPaths.size > 0) {
+			this.blockPushForConflicts();
 			return;
 		}
 
@@ -223,6 +581,11 @@ export class SyncService {
 				message: validationMessage
 			});
 			new Notice(validationMessage);
+			return;
+		}
+
+		if (this.conflictedPaths.size > 0) {
+			this.blockPushForConflicts();
 			return;
 		}
 
@@ -326,11 +689,28 @@ export class SyncService {
 
 		try {
 			const connection = createCouchDbConnection(settings);
+			const pendingPaths = this.takePendingSyncPaths();
+
+			try {
+				await this.syncFilePaths(pendingPaths);
+			} catch (error) {
+				for (const path of pendingPaths) {
+					this.pendingSyncPaths.add(path);
+				}
+
+				throw error;
+			}
+
 			const localRecordsBeforePull = await this.store.listFileRecords();
 			const localRecordsById = new Map(localRecordsBeforePull.map(
 				(record) => [record._id, record])
 			);
 			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
+			const recordIdsBeforePull = Array.from(new Set([
+				...await this.store.listAllFileRecordIds(),
+				...localVaultRecordIds
+			]));
+			const revisionStatesBeforePull = await this.store.listFileRevisionStates(recordIdsBeforePull);
 
 			const pullResult = await this.store.pullFromCouchDb(
 				connection,
@@ -342,16 +722,18 @@ export class SyncService {
 				}
 			);
 
-			const deletionCandidateIds = Array.from(
-				new Set([
-					...localRecordsById.keys(),
-					...localVaultRecordIds
-				])
+			const recordIdsAfterPull = Array.from(new Set([
+				...recordIdsBeforePull,
+				...await this.store.listAllFileRecordIds()
+			]));
+			const revisionStatesAfterPull = await this.store.listFileRevisionStates(recordIdsAfterPull);
+			const classification = await this.classifyPullResults(
+				revisionStatesBeforePull,
+				revisionStatesAfterPull,
+				localRecordsById
 			);
-
-			const deletedFileRecords = await this.store.listDeletedFileRecordIds(deletionCandidateIds);
-			const deletedRecordIds = deletedFileRecords.deletedRecordIds;
-			const conflictedRecordIds = deletedFileRecords.conflictedRecordIds;
+			const deletedRecordIds = classification.deletedRecordIds;
+			const conflictedRecordIds = classification.conflictedRecordIds;
 			const deletionResult = await this.deleteRemoteDeletedFiles(deletedRecordIds, localRecordsById);
 			const restoreResult = await this.restoreVaultFiles(
 				new Set([
@@ -360,7 +742,7 @@ export class SyncService {
 				])
 			);
 			const skipped = restoreResult.skipped + deletionResult.skipped;
-			const conflicts = restoreResult.conflicts + deletionResult.conflicts + conflictedRecordIds.length;
+			const conflicts = restoreResult.conflicts + deletionResult.conflicts + conflictedRecordIds.size;
 
 			this.onStatusChange({
 				state: "pulled",
@@ -390,6 +772,161 @@ export class SyncService {
 		}
 	}
 
+	private async classifyPullResults(
+		statesBeforePull: FileRevisionState[],
+		statesAfterPull: FileRevisionState[],
+		localRecordsById: Map<string, VaultFileRecord>
+	): Promise<PullClassification> {
+		const statesBeforeById = new Map(statesBeforePull.map((state) => [state.recordId, state]));
+		const activeConflicts = await this.conflictStore.listActiveConflicts();
+		const activeConflictsByRecordId = new Map(activeConflicts.map(
+			(conflict) => [conflict.recordId, conflict]
+		));
+		const conflictedRecordIds = new Set(activeConflicts.map((conflict) => conflict.recordId));
+		const deletedRecordIds: string[] = [];
+
+		for (const state of statesAfterPull) {
+			const rawPath = getPathFromFileRecordId(state.recordId);
+			const path = rawPath ? normalizeRestoredPath(rawPath) : "";
+
+			if (!path || isSyncBlacklistedPath(path) || !isPathInsideSyncFolder(path, this.getCurrentSyncFolder())) {
+				continue;
+			}
+
+			const stateBeforePull = statesBeforeById.get(state.recordId);
+			const liveLeaves = state.leaves.filter((leaf) => !leaf.deleted && leaf.record);
+			const deletedLeaves = state.leaves.filter((leaf) => leaf.deleted);
+			const acknowledgedDeletedRevisions = new Set(
+				liveLeaves.flatMap((leaf) => leaf.record?.conflictResolution?.acknowledgedDeletedLeafRevisions ?? [])
+			);
+			const unacknowledgedDeletedLeaves = deletedLeaves.filter(
+				(leaf) => !acknowledgedDeletedRevisions.has(leaf.revision)
+			);
+			const localRecord = localRecordsById.get(state.recordId);
+			const localVariant = await this.captureLocalVariant(path);
+			const localContentChanged = await this.hasLocalContentChanged(path, localRecord, localVariant);
+			const existingConflict = activeConflictsByRecordId.get(state.recordId);
+			let conflictKind: SyncConflictKind | null = null;
+
+			if (existingConflict?.status === "pending-push") {
+				continue;
+			} else if (existingConflict) {
+				conflictKind = existingConflict.kind;
+			} else if (liveLeaves.length > 0 && this.hasRestorePathCollision(path)) {
+				conflictKind = "path-collision";
+			} else if (liveLeaves.length > 1) {
+				conflictKind = stateBeforePull?.leaves.every((leaf) => leaf.deleted) || !localVariant.exists
+					? "local-delete-remote-edit"
+					: "edit-edit";
+			} else if (liveLeaves.length > 0 && unacknowledgedDeletedLeaves.length > 0) {
+				conflictKind = stateBeforePull?.leaves.every((leaf) => leaf.deleted) || !localVariant.exists
+					? "local-delete-remote-edit"
+					: "local-edit-remote-delete";
+			} else if (liveLeaves.length === 0 && deletedLeaves.length > 0) {
+				if (localVariant.exists && (localContentChanged || !localRecord)) {
+					conflictKind = "local-edit-remote-delete";
+				} else {
+					deletedRecordIds.push(state.recordId);
+				}
+			} else if (liveLeaves.length === 1 && localContentChanged) {
+				const remoteHash = liveLeaves[0]?.record?.contentHash;
+
+				if (remoteHash && remoteHash !== localVariant.contentHash) {
+					conflictKind = "edit-edit";
+				}
+			}
+
+			if (!conflictKind) {
+				continue;
+			}
+
+			const now = new Date().toISOString();
+			await this.conflictStore.upsertConflict({
+				_id: createConflictId(state.recordId),
+				recordId: state.recordId,
+				path,
+				kind: conflictKind,
+				status: "pending",
+				detectedAt: now,
+				updatedAt: now,
+				observedLeafRevisions: state.leaves.map((leaf) => leaf.revision).sort(),
+				localVariant,
+				remoteVariants: state.leaves.map((leaf) => ({
+					revision: leaf.revision,
+					deleted: leaf.deleted,
+					winning: leaf.revision === state.winningRevision,
+					contentHash: leaf.record?.contentHash,
+					fileType: leaf.record?.fileType,
+					lastChangedIso: leaf.record?.lastChangedIso
+				}))
+			});
+			conflictedRecordIds.add(state.recordId);
+		}
+
+		await this.refreshActiveConflicts();
+
+		return {
+			deletedRecordIds: deletedRecordIds.filter((recordId) => !conflictedRecordIds.has(recordId)),
+			conflictedRecordIds
+		};
+	}
+
+	private async captureLocalVariant(path: string): Promise<SyncConflictLocalVariant> {
+		const abstractFile = this.app.vault.getAbstractFileByPath(path);
+
+		if (!(abstractFile instanceof TFile)) {
+			return { exists: false };
+		}
+
+		const record = await createFileRecord(this.app, abstractFile);
+		return {
+			exists: true,
+			contentHash: record.contentHash,
+			fileType: record.fileType,
+			lastChanged: record.lastChanged
+		};
+	}
+
+	private async hasLocalContentChanged(
+		path: string,
+		localRecord: VaultFileRecord | undefined,
+		localVariant: SyncConflictLocalVariant
+	) {
+		if (!localVariant.exists) {
+			return false;
+		}
+
+		if (!localRecord) {
+			return true;
+		}
+
+		const abstractFile = this.app.vault.getAbstractFileByPath(path);
+		return abstractFile instanceof TFile
+			&& !(await this.localFileMatchesRecord(abstractFile, localRecord));
+	}
+
+	private hasRestorePathCollision(path: string) {
+		const existing = this.app.vault.getAbstractFileByPath(path);
+
+		if (existing && !(existing instanceof TFile)) {
+			return true;
+		}
+
+		const parts = path.split("/");
+		parts.pop();
+		let parentPath = "";
+
+		for (const part of parts) {
+			parentPath = parentPath ? `${parentPath}/${part}` : part;
+
+			if (this.app.vault.getAbstractFileByPath(parentPath) instanceof TFile) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	private async deleteRemoteDeletedFiles(
 		deletedRecordIds: string[],
 		localRecordsById: Map<string, VaultFileRecord>
@@ -399,7 +936,7 @@ export class SyncService {
 		let conflicts = 0;
 		const uniqueDeletedRecordIds = Array.from(new Set(deletedRecordIds));
 
-		this.applyingRemoteDeletion = true;
+		this.applyingRemoteChange = true;
 
 		try {
 			for (const [index, recordId] of uniqueDeletedRecordIds.entries()) {
@@ -423,7 +960,7 @@ export class SyncService {
 				});
 			}
 		} finally {
-			this.applyingRemoteDeletion = false;
+			this.applyingRemoteChange = false;
 		}
 
 		return {
@@ -555,7 +1092,9 @@ export class SyncService {
 		let skippedCount = 0;
 
 		for (const [index, file] of files.entries()) {
-			const saved = await this.syncFileIfChanged(file);
+			const saved = this.conflictedPaths.has(file.path)
+				? false
+				: await this.syncFileIfChanged(file);
 
 			if (saved) {
 				savedCount += 1;
@@ -596,33 +1135,38 @@ export class SyncService {
 		let conflicts = 0;
 
 		const records = await this.store.listFileRecords();
+		this.applyingRemoteChange = true;
 
-		for (const [index, record] of records.entries()) {
-			let restoreStatus: "restored" | "skipped" | "conflict";
+		try {
+			for (const [index, record] of records.entries()) {
+				let restoreStatus: "restored" | "skipped" | "conflict";
 
-			try {
-				restoreStatus = deletedRecordIds.has(record._id) ? "skipped" : await this.restoreVaultFile(record);
-			} catch (error) {
-				logger.warn("Skipped remote file during restore", error, { path: record.path });
-				restoreStatus = "skipped";
+				try {
+					restoreStatus = deletedRecordIds.has(record._id) ? "skipped" : await this.restoreVaultFile(record);
+				} catch (error) {
+					logger.warn("Skipped remote file during restore", error, { path: record.path });
+					restoreStatus = "skipped";
+				}
+
+				if (restoreStatus === "restored") {
+					restored += 1;
+				} else if (restoreStatus === "conflict") {
+					conflicts += 1;
+				} else {
+					skipped += 1;
+				}
+
+				this.onStatusChange({
+					state: "restoring",
+					current: index + 1,
+					total: records.length,
+					restored,
+					skipped,
+					conflicts
+				});
 			}
-
-			if (restoreStatus === "restored") {
-				restored += 1;
-			} else if (restoreStatus === "conflict") {
-				conflicts += 1;
-			} else {
-				skipped += 1;
-			}
-
-			this.onStatusChange({
-				state: "restoring",
-				current: index + 1,
-				total: records.length,
-				restored,
-				skipped,
-				conflicts
-			});
+		} finally {
+			this.applyingRemoteChange = false;
 		}
 
 		return {
@@ -715,11 +1259,19 @@ export class SyncService {
 	}
 
 	queueFileSync(abstractFile: TAbstractFile) {
+		if (this.applyingRemoteChange) {
+			return;
+		}
+
 		if (!(abstractFile instanceof TFile)) {
 			return;
 		}
 
 		if (!this.isFileInsideCurrentSyncFolder(abstractFile)) {
+			return;
+		}
+
+		if (this.conflictedPaths.has(abstractFile.path)) {
 			return;
 		}
 
@@ -736,6 +1288,10 @@ export class SyncService {
 	}
 
 	async handleRenamedFile(abstractFile: TAbstractFile, oldPath: string) {
+		if (this.applyingRemoteChange || this.conflictedPaths.has(oldPath)) {
+			return;
+		}
+
 		if (!isSyncBlacklistedPath(oldPath)) {
 			await this.store.deleteFileRecordByPath(oldPath);
 		}
@@ -744,7 +1300,7 @@ export class SyncService {
 	}
 
 	async handleDeletedFile(abstractFile: TAbstractFile) {
-		if (this.applyingRemoteDeletion) {
+		if (this.applyingRemoteChange || this.conflictedPaths.has(abstractFile.path)) {
 			return;
 		}
 
@@ -762,6 +1318,7 @@ export class SyncService {
 		}
 
 		void this.store.close();
+		void this.conflictStore.close();
 	}
 
 	private scheduleQueuedSync() {
@@ -834,7 +1391,11 @@ export class SyncService {
 		for (const [index, path] of paths.entries()) {
 			const abstractFile = this.app.vault.getAbstractFileByPath(path);
 
-			if (abstractFile instanceof TFile && this.isFileInsideCurrentSyncFolder(abstractFile)) {
+			if (
+				!this.conflictedPaths.has(path)
+				&& abstractFile instanceof TFile
+				&& this.isFileInsideCurrentSyncFolder(abstractFile)
+			) {
 				if (await this.syncFileIfChanged(abstractFile)) {
 					saved += 1;
 				} else {
@@ -939,6 +1500,14 @@ function getPendingPushBlockingState(
 	}
 
 	return null;
+}
+
+function createConflictId(recordId: string) {
+	return `mysync-conflict:${recordId}`;
+}
+
+function arraysEqual(left: string[], right: string[]) {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing") {

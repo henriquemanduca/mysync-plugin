@@ -90,6 +90,8 @@ MySync adds these command palette commands:
   changes to CouchDB.
 - **Pull from remote**: pull CouchDB changes into the local PouchDB index, then
   restore or delete vault files based on the remote state.
+- **Resolve sync conflicts**: open the conflict pop-up and choose whether to keep
+  the local version, the remote version, or both versions.
 - **Test remote connection**: verify that the configured CouchDB database is
   reachable.
 
@@ -107,6 +109,11 @@ time when available.
 - Remote pull can overwrite existing local files when the remote record differs.
 - Remote deletion handling avoids deleting locally changed files when a conflict
   is detected, but you should still review important files after sync.
+- Conflicted paths are excluded from automatic local sync and remote push until
+  they are resolved. If a resolution cannot be pushed, reopen the conflict
+  pop-up to retry it.
+- The local conflict database is created automatically and its name follows the
+  local file database identifier for the current vault.
 - CouchDB hosting, backups, HTTPS, user management, and access control are your
   responsibility.
 - Credentials are stored in Obsidian plugin data. Do not commit plugin data,
