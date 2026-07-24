@@ -453,7 +453,7 @@ export class PouchDbFileStore {
 				_id: recordId,
 				_rev: winningRevision,
 				conflictResolution: undefined
-			} as VaultFileRecord & { _rev: string });
+			});
 
 			for (const leaf of state.leaves) {
 				if (!leaf.deleted && leaf.revision !== winningRevision) {
