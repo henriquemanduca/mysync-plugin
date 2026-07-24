@@ -19,6 +19,7 @@ export interface MySyncSettings {
 	lastSyncNowAt: string;
 	lastPushToCouchDbAt: string;
 	lastPullFromCouchDbAt: string;
+	lastLocalDatabaseResetAt: string;
 }
 
 export const DEFAULT_SETTINGS: MySyncSettings = {
@@ -33,7 +34,8 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	logLevel: "debug",
 	lastSyncNowAt: "",
 	lastPushToCouchDbAt: "",
-	lastPullFromCouchDbAt: ""
+	lastPullFromCouchDbAt: "",
+	lastLocalDatabaseResetAt: ""
 };
 
 function isSyncFolderMode(value: string): value is SyncFolderMode {
@@ -147,6 +149,28 @@ export class MySyncSettingTab extends PluginSettingTab {
 			},
 			{
 				type: "group",
+				heading: "Local data",
+				cls: "mysync-settings-section",
+				items: [
+					this.createReadonlyDateSetting(
+						"Last local database reset",
+						"Last time the local file and conflict databases were reset.",
+						"lastLocalDatabaseResetAt"
+					),
+					{
+						name: "Reset local databases",
+						desc: "Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.",
+						render: (setting) => {
+							setting.addButton((button) => button
+								.setButtonText("Reset local databases")
+								.setWarning()
+								.onClick(() => this.plugin.openLocalDatabaseResetModal()));
+						}
+					}
+				]
+			},
+			{
+				type: "group",
 				heading: "Remote database",
 				cls: "mysync-settings-section",
 				items: [
@@ -241,7 +265,11 @@ export class MySyncSettingTab extends PluginSettingTab {
 	private createReadonlyDateSetting(
 		name: string,
 		desc: string,
-		key: "lastSyncNowAt" | "lastPushToCouchDbAt" | "lastPullFromCouchDbAt"
+		key:
+			| "lastSyncNowAt"
+			| "lastPushToCouchDbAt"
+			| "lastPullFromCouchDbAt"
+			| "lastLocalDatabaseResetAt"
 	): SettingGroupItem {
 		return {
 			name,
@@ -272,6 +300,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		const localSectionEl = this.createLegacySection("Local configuration");
+		const localDataSectionEl = this.createLegacySection("Local data");
 		const remoteSectionEl = this.createLegacySection("Remote database");
 
 		new Setting(localSectionEl)
@@ -361,6 +390,21 @@ export class MySyncSettingTab extends PluginSettingTab {
 			"Last successful remote pull execution.",
 			this.plugin.settings.lastPullFromCouchDbAt
 		);
+
+		this.addReadonlyLegacyDateSetting(
+			localDataSectionEl,
+			"Last local database reset",
+			"Last time the local file and conflict databases were reset.",
+			this.plugin.settings.lastLocalDatabaseResetAt
+		);
+
+		new Setting(localDataSectionEl)
+			.setName("Reset local databases")
+			.setDesc("Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.")
+			.addButton((button) => button
+				.setButtonText("Reset local databases")
+				.setWarning()
+				.onClick(() => this.plugin.openLocalDatabaseResetModal()));
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")

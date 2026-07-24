@@ -89,6 +89,34 @@ export class PouchDbConflictStore {
 		});
 	}
 
+	async reset() {
+		const resetOperation = this.operationQueue.then(async () => {
+			this.ensureLocalDbOpen();
+			logger.warn("Resetting local conflict database", undefined, {
+				database: this.localDatabaseName
+			});
+
+			try {
+				await this.conflictDb.destroy();
+			} finally {
+				this.conflictDbClosed = true;
+				this.ensureLocalDbOpen();
+			}
+
+			await this.conflictDb.info();
+			logger.info("Local conflict database reset completed", {
+				database: this.localDatabaseName
+			});
+		});
+
+		this.operationQueue = resetOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		await resetOperation;
+	}
+
 	async close() {
 		const closeOperation = this.operationQueue.then(async () => {
 			if (!this.conflictDbClosed) {

@@ -66,11 +66,17 @@ export type SyncStatus =
 	| { state: "deleting"; current: number; total: number; deleted: number; skipped: number; conflicts: number }
 	| { state: "restoring"; current: number; total: number; restored: number; skipped: number; conflicts: number }
 	| { state: "pulled"; docsRead: number; restored: number; deleted: number; skipped: number; conflicts: number }
+	| { state: "resetting-local-databases" }
+	| { state: "local-databases-reset" }
 	| { state: "testing" }
 	| { state: "tested"; databaseName: string; documentCount?: number }
 	| { state: "error"; message: string };
 
-export type CompletedSyncOperation = "syncNow" | "pushToCouchDb" | "pullFromCouchDb";
+export type CompletedSyncOperation =
+	| "syncNow"
+	| "pushToCouchDb"
+	| "pullFromCouchDb"
+	| "resetLocalDatabases";
 
 const logger = new Logger("SyncService");
 
@@ -430,6 +436,54 @@ export class SyncService {
 	isRunning(): boolean {
 		if (this.syncInProgress) new Notice("A sync process is already running.");
 		return this.syncInProgress;
+	}
+
+	async resetLocalDatabases(): Promise<boolean> {
+		if (this.isRunning()) {
+			return false;
+		}
+
+		const previouslyPendingPaths = this.takePendingSyncPaths();
+		this.syncInProgress = true;
+		this.onStatusChange({ state: "resetting-local-databases" });
+
+		try {
+			logger.warn("Local database reset started");
+			await this.store.reset();
+			await this.conflictStore.reset();
+			await this.refreshActiveConflicts();
+
+			try {
+				await this.onOperationCompleted("resetLocalDatabases");
+			} catch (error) {
+				logger.warn("Failed to save local database reset timestamp", error);
+			}
+
+			this.onStatusChange({ state: "local-databases-reset" });
+			new Notice(
+				"Local databases reset. Pull before pushing to an existing remote database."
+			);
+			logger.info("Local database reset completed");
+			return true;
+		} catch (error) {
+			for (const path of previouslyPendingPaths) {
+				this.pendingSyncPaths.add(path);
+			}
+
+			logger.error("Local database reset failed", error);
+			this.onStatusChange({
+				state: "error",
+				message: "Local database reset failed"
+			});
+			new Notice(getErrorMessage(
+				error,
+				"Local database reset failed. Check the console for details."
+			));
+			return false;
+		} finally {
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+		}
 	}
 
 	async syncNow() {

@@ -610,6 +610,34 @@ export class PouchDbFileStore {
 		}
 	}
 
+	async reset() {
+		const resetOperation = this.operationQueue.then(async () => {
+			this.ensureLocalDbOpen();
+			logger.warn("Resetting local file database", undefined, {
+				database: this.localDatabaseName
+			});
+
+			try {
+				await this.fileDb.destroy();
+			} finally {
+				this.fileDbClosed = true;
+				this.ensureLocalDbOpen();
+			}
+
+			await this.fileDb.info();
+			logger.info("Local file database reset completed", {
+				database: this.localDatabaseName
+			});
+		});
+
+		this.operationQueue = resetOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		await resetOperation;
+	}
+
 	async close() {
 		const closeOperation = this.operationQueue.then(async () => {
 			if (!this.fileDbClosed) {

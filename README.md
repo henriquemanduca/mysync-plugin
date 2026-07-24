@@ -67,6 +67,10 @@ Open **Settings -> MySync** in Obsidian.
   selected.
 - **Last sync now**, **Last push to CouchDB**, and **Last pull from CouchDB**:
   read-only timestamps for successful operations.
+- **Last local database reset**: read-only timestamp for the most recent
+  successful reset of both local MySync databases.
+- **Reset local databases**: delete the local file index and conflict history
+  without changing vault files or the remote CouchDB database.
 
 ### Remote Database
 
@@ -95,6 +99,16 @@ MySync adds these command palette commands:
 - **Test remote connection**: verify that the configured CouchDB database is
   reachable.
 
+The **Reset local databases** action is available in MySync settings. It removes
+local file records, revision trees, conflicts, baselines, and replication
+checkpoints, then recreates both databases with the same vault-specific names.
+It does not delete or modify files in the vault and does not make requests that
+change the remote CouchDB database.
+
+After a reset, pull before pushing when the configured remote database already
+contains MySync records. The regular push safety check blocks a full push to a
+non-empty remote database until a new remote baseline has been established.
+
 The ribbon icon runs **Push to remote**.
 
 The status bar shows queued local changes, sync progress, push or pull progress,
@@ -112,6 +126,9 @@ time when available.
 - Conflicted paths are excluded from automatic local sync and remote push until
   they are resolved. If a resolution cannot be pushed, reopen the conflict
   pop-up to retry it.
+- Resetting the local databases permanently removes the local conflict history,
+  revision trees, baselines, and replication checkpoints. Back up important
+  data and review the confirmation before continuing.
 - The local conflict database is created automatically and its name follows the
   local file database identifier for the current vault.
 - CouchDB hosting, backups, HTTPS, user management, and access control are your

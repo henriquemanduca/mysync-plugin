@@ -5,6 +5,7 @@ import { PouchDbConflictStore } from "./sync/conflict-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
 import type { SyncConflict } from "./sync/types";
 import { ConflictResolutionModal } from "./conflict-resolution-modal";
+import { LocalDatabaseResetModal } from "./local-database-reset-modal";
 import { formatDateTime } from "./utils/date-format";
 import { isLoggerLevel, Logger } from "./utils/logger";
 import { isAndroidApp } from "./utils/platform";
@@ -23,7 +24,8 @@ const STRING_SETTING_KEYS = [
 	"couchDbPassword",
 	"lastSyncNowAt",
 	"lastPushToCouchDbAt",
-	"lastPullFromCouchDbAt"
+	"lastPullFromCouchDbAt",
+	"lastLocalDatabaseResetAt"
 ] as const;
 
 interface SyncStatusView {
@@ -40,6 +42,7 @@ export default class MySyncPlugin extends Plugin {
 	private activeConflictCount = 0;
 	private currentSyncStatus: SyncStatus = { state: "idle" };
 	private conflictModal: ConflictResolutionModal | null = null;
+	private localDatabaseResetModal: LocalDatabaseResetModal | null = null;
 
 	async onload() {
 		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
@@ -66,6 +69,10 @@ export default class MySyncPlugin extends Plugin {
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
 			// await this.syncService.syncNow();
 			await this.syncService.pushToCouchDb();
+		});
+
+		this.addRibbonIcon("file-up", "Push pending files to remote", async () => {
+			await this.syncService.pushPendingFilesToCouchDb();
 		});
 
 		this.addCommand({
@@ -149,6 +156,7 @@ export default class MySyncPlugin extends Plugin {
 	onunload() {
 		this.clearIdleStatusTimer();
 		this.conflictModal?.close();
+		this.localDatabaseResetModal?.close();
 		this.syncService.close();
 		void Logger.flush();
 		// Obsidian automatically disposes registered events, commands, and intervals.
@@ -191,6 +199,23 @@ export default class MySyncPlugin extends Plugin {
 		Logger.setLevel(value);
 	}
 
+	openLocalDatabaseResetModal() {
+		if (this.localDatabaseResetModal) {
+			return;
+		}
+
+		this.localDatabaseResetModal = new LocalDatabaseResetModal(
+			this.app,
+			createLocalDatabaseName(this.settings.localVaultId),
+			this.settings.localConflictDatabase,
+			() => this.syncService.resetLocalDatabases(),
+			() => {
+				this.localDatabaseResetModal = null;
+			}
+		);
+		this.localDatabaseResetModal.open();
+	}
+
 	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
 		const completedAt = new Date().toISOString();
 
@@ -198,8 +223,10 @@ export default class MySyncPlugin extends Plugin {
 			this.settings.lastSyncNowAt = completedAt;
 		} else if (operation === "pushToCouchDb") {
 			this.settings.lastPushToCouchDbAt = completedAt;
-		} else {
+		} else if (operation === "pullFromCouchDb") {
 			this.settings.lastPullFromCouchDbAt = completedAt;
+		} else {
+			this.settings.lastLocalDatabaseResetAt = completedAt;
 		}
 
 		await this.saveSettings();
@@ -425,6 +452,19 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 			return {
 				text: `restored ${status.restored}, deleted ${status.deleted}`,
 				title: `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`,
+				returnToIdle: true
+			};
+
+		case "resetting-local-databases":
+			return {
+				text: "resetting local data",
+				title: "Resetting local MySync databases"
+			};
+
+		case "local-databases-reset":
+			return {
+				text: "local data reset",
+				title: "Local MySync databases were reset",
 				returnToIdle: true
 			};
 

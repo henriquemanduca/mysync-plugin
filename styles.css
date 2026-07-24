@@ -25,3 +25,15 @@
 .mysync-conflict-error {
 	color: var(--text-error);
 }
+
+.mysync-reset-database-list code {
+	overflow-wrap: anywhere;
+}
+
+.mysync-reset-scope-note {
+	color: var(--text-muted);
+}
+
+.mysync-reset-warning {
+	color: var(--text-error);
+}
