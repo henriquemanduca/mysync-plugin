@@ -9,8 +9,8 @@ for users who want to run their own sync backend instead of relying on a hosted
 sync provider.
 
 > [!WARNING]
-> MySync is currently beta software. Back up your vault before using it with
-> important notes. Pulling from CouchDB can restore, overwrite, or delete local
+> Back up your vault before using it with important notes.
+> Pulling from CouchDB can restore, overwrite, or delete local
 > files based on the remote database state.
 
 ## Features
