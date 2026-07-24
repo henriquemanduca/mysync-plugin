@@ -1,8 +1,9 @@
-import { App, TFile, TFolder } from "obsidian";
+import { App, normalizePath, TFile, TFolder } from "obsidian";
 import type { VaultFileRecord, VaultFileType } from "./types";
 
 const VAULT_FILE_PREFIX = "vault-file";
 const FILE_ATTACHMENT_ID = "file";
+const BINARY_MIME_TYPE = "application/octet-stream";
 const BLACKLISTED_SYNC_FILE_NAMES = new Set([
 	".nomedia"
 ]);
@@ -100,6 +101,26 @@ export function collectSyncableFilesInFolder(folder: TFolder) {
 	return collectFilesInFolder(folder).filter(isSyncableVaultFile);
 }
 
+export async function listObsidianConfigFilePaths(app: App) {
+	const configDir = normalizePath(app.vault.configDir);
+	const listedFiles = await app.vault.adapter.list(configDir);
+
+	return listedFiles.files
+		.map((path) => normalizePath(path))
+		.filter((path) => isObsidianConfigFilePath(app, path))
+		.sort();
+}
+
+export function isObsidianConfigFilePath(app: App, path: string) {
+	const configDir = normalizePath(app.vault.configDir);
+	const normalizedPath = normalizePath(path);
+	const relativePath = normalizedPath.slice(configDir.length + 1);
+
+	return normalizedPath.startsWith(`${configDir}/`)
+		&& relativePath.length > 0
+		&& !relativePath.includes("/");
+}
+
 export function isFileInsideSyncFolder(file: TFile, syncFolder: string) {
 	return isPathInsideSyncFolder(file.path, syncFolder);
 }
@@ -160,6 +181,47 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 	return record;
 }
 
+export async function createObsidianConfigFileRecord(
+	app: App,
+	path: string
+): Promise<VaultFileRecord> {
+	if (!isObsidianConfigFilePath(app, path)) {
+		throw new Error(`Path is not a top-level Obsidian configuration file: ${path}`);
+	}
+
+	const normalizedPath = normalizePath(path);
+	const [stat, binaryContent] = await Promise.all([
+		app.vault.adapter.stat(normalizedPath),
+		app.vault.adapter.readBinary(normalizedPath)
+	]);
+
+	if (!stat || stat.type !== "file") {
+		throw new Error(`Obsidian configuration file not found: ${normalizedPath}`);
+	}
+
+	const fileName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
+
+	return {
+		_id: createFileRecordId(normalizedPath),
+		type: "vault-file",
+		source: "obsidian-config",
+		fileType: "binary",
+		fileName,
+		path: normalizedPath,
+		mimeType: BINARY_MIME_TYPE,
+		size: stat.size,
+		contentHash: await createBinaryContentHash(binaryContent),
+		_attachments: {
+			[FILE_ATTACHMENT_ID]: {
+				content_type: BINARY_MIME_TYPE,
+				data: new Blob([binaryContent], { type: BINARY_MIME_TYPE })
+			}
+		},
+		lastChanged: stat.mtime,
+		lastChangedIso: new Date(stat.mtime).toISOString()
+	};
+}
+
 export function createFileRecordId(path: string) {
 	return `${VAULT_FILE_PREFIX}:${path}`;
 }
@@ -177,6 +239,10 @@ export function getPathFromFileRecordId(id: string) {
 export async function createLocalFileContentHash(app: App, file: TFile, fileType: VaultFileType) {
 	const fileContent = await readVaultFileContent(app, file, fileType);
 	return fileContent.contentHash;
+}
+
+export async function createAdapterFileContentHash(app: App, path: string) {
+	return createBinaryContentHash(await app.vault.adapter.readBinary(normalizePath(path)));
 }
 
 export function normalizeTextContent(content: string) {

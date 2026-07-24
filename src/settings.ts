@@ -115,6 +115,17 @@ export class MySyncSettingTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: "Obsidian configuration folder",
+						desc: "Top-level files in this folder are included in synchronization.",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.readOnly = true;
+								text.inputEl.addClass("mysync-readonly-setting");
+								text.setValue(this.app.vault.configDir);
+							});
+						}
+					},
+					{
 						name: "Log level",
 						desc: "Minimum level written to the console and mysync.log.",
 						control: {
@@ -353,6 +364,15 @@ export class MySyncSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(localSectionEl)
+			.setName("Obsidian configuration folder")
+			.setDesc("Top-level files in this folder are included in synchronization.")
+			.addText((text) => {
+				text.inputEl.readOnly = true;
+				text.inputEl.addClass("mysync-readonly-setting");
+				text.setValue(this.app.vault.configDir);
+			});
 
 		new Setting(localSectionEl)
 			.setName("Log level")

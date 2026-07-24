@@ -16,6 +16,8 @@ sync provider.
 ## Features
 
 - Sync the full vault or a custom folder inside the vault.
+- Sync top-level Obsidian configuration files using the vault's configured
+  configuration directory.
 - Track Markdown files, PDFs, and common image formats.
 - Push local vault changes to a CouchDB database.
 - Pull remote CouchDB changes back into the vault.
@@ -65,6 +67,9 @@ Open **Settings -> MySync** in Obsidian.
 - **Folder source**: choose whether to sync the vault root or a custom folder.
 - **Custom sync folder**: folder path inside the vault when custom mode is
   selected.
+- **Obsidian configuration folder**: read-only path reported by Obsidian.
+  Top-level files in this folder are included even though hidden configuration
+  files are not exposed by the regular Vault file tree.
 - **Last sync now**, **Last push to CouchDB**, and **Last pull from CouchDB**:
   read-only timestamps for successful operations.
 - **Last local database reset**: read-only timestamp for the most recent
@@ -121,6 +126,11 @@ time when available.
 - MySync has only been tested with `.md`, `.pdf`, and image files so far.
   Other file types may not sync or restore correctly yet.
 - Remote pull can overwrite existing local files when the remote record differs.
+- Remote pull can also restore or delete top-level Obsidian configuration
+  files. Reload Obsidian after pulling configuration changes.
+- Theme, snippet, and community-plugin subfolders are not copied. This prevents
+  plugin bundles and plugin-owned credential files from being uploaded as
+  Obsidian configuration.
 - Remote deletion handling avoids deleting locally changed files when a conflict
   is detected, but you should still review important files after sync.
 - Conflicted paths are excluded from automatic local sync and remote push until

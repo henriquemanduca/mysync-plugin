@@ -3,6 +3,7 @@ export type VaultFileType = "markdown" | "image" | "binary" | "other";
 export interface VaultFileRecord {
 	_id: string;
 	type: "vault-file";
+	source?: "vault" | "obsidian-config";
 	fileType: VaultFileType;
 	fileName: string;
 	path: string;

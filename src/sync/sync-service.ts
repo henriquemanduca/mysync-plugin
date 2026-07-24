@@ -15,18 +15,22 @@ import type {
 } from "./types";
 import {
 	collectSyncableFilesInFolder,
+	createAdapterFileContentHash,
 	createBinaryContentHash,
 	createFileRecord,
 	createFileRecordId,
 	createLocalFileContentHash,
+	createObsidianConfigFileRecord,
 	createTextContentHash,
 	getPathFromFileRecordId,
 	getSyncFolder,
 	getSyncFolderState,
 	isFileInsideSyncFolder,
 	isSyncBlacklistedPath,
+	isObsidianConfigFilePath,
 	isSyncableVaultFile,
-	isPathInsideSyncFolder
+	isPathInsideSyncFolder,
+	listObsidianConfigFilePaths
 } from "./vault-files";
 import { Logger } from "../utils/logger";
 
@@ -41,6 +45,7 @@ interface RestoreResult {
 	restored: number;
 	skipped: number;
 	conflicts: number;
+	configurationChanged: boolean;
 }
 
 interface RemoteDeletionResult {
@@ -48,6 +53,7 @@ interface RemoteDeletionResult {
 	deleted: number;
 	skipped: number;
 	conflicts: number;
+	configurationChanged: boolean;
 }
 
 interface PullClassification {
@@ -261,26 +267,19 @@ export class SyncService {
 
 		try {
 			if (strategy === "delete") {
-				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
-
-				if (existing instanceof TFile) {
-					await this.app.fileManager.trashFile(existing);
-				} else if (existing) {
-					throw new Error(`Cannot delete ${conflict.path}: the path is not a file.`);
-				}
+				await this.deleteLocalFile(conflict.path);
 
 				await this.store.resolveFileRecordAsDeleted(conflict.recordId);
 				return [conflict.recordId];
 			}
 
 			if (strategy === "keep-local") {
-				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
+				const localRecord = await this.createLocalRecord(conflict.path);
 
-				if (!(existing instanceof TFile)) {
+				if (!localRecord) {
 					throw new Error(`Local file not found: ${conflict.path}`);
 				}
 
-				const localRecord = await createFileRecord(this.app, existing);
 				await this.store.resolveFileRecordWithContent(
 					conflict.recordId,
 					localRecord,
@@ -305,22 +304,20 @@ export class SyncService {
 			}
 
 			if (strategy === "keep-both") {
-				const existing = this.app.vault.getAbstractFileByPath(conflict.path);
+				const localRecord = await this.createLocalRecord(conflict.path);
 
-				if (!(existing instanceof TFile)) {
+				if (!localRecord) {
 					throw new Error("Keep both requires an existing local file.");
 				}
 
-				const localRecord = await createFileRecord(this.app, existing);
-				const copyPath = this.createConflictCopyPath(conflict.path);
+				const copyPath = await this.createConflictCopyPath(conflict.path);
 				await this.writeRecordToVault(remoteRecord, copyPath);
-				const copyFile = this.app.vault.getAbstractFileByPath(copyPath);
+				const copyRecord = await this.createLocalRecord(copyPath);
 
-				if (!(copyFile instanceof TFile)) {
+				if (!copyRecord) {
 					throw new Error(`Failed to create conflict copy: ${copyPath}`);
 				}
 
-				const copyRecord = await createFileRecord(this.app, copyFile);
 				await this.store.saveFileRecordIfChanged(copyRecord);
 				await this.store.resolveFileRecordWithContent(
 					conflict.recordId,
@@ -353,6 +350,27 @@ export class SyncService {
 	}
 
 	private async writeRecordToVault(record: VaultFileRecord, path: string) {
+		if (record.source === "obsidian-config" || isObsidianConfigFilePath(this.app, path)) {
+			if (!isObsidianConfigFilePath(this.app, path)) {
+				throw new Error(`Cannot restore configuration outside ${this.app.vault.configDir}: ${path}`);
+			}
+
+			const existing = await this.app.vault.adapter.stat(path);
+
+			if (existing?.type === "folder") {
+				throw new Error(`Cannot restore ${path}: the path is not a file.`);
+			}
+
+			const data = await getAttachmentArrayBuffer(record);
+
+			if (!data) {
+				throw new Error(`Configuration content is unavailable for ${path}.`);
+			}
+
+			await this.app.vault.adapter.writeBinary(path, data);
+			return;
+		}
+
 		const existing = this.app.vault.getAbstractFileByPath(path);
 
 		if (existing && !(existing instanceof TFile)) {
@@ -399,7 +417,7 @@ export class SyncService {
 		await this.app.vault.createBinary(path, data);
 	}
 
-	private createConflictCopyPath(path: string) {
+	private async createConflictCopyPath(path: string) {
 		const slashIndex = path.lastIndexOf("/");
 		const folder = slashIndex >= 0 ? path.slice(0, slashIndex + 1) : "";
 		const fileName = slashIndex >= 0 ? path.slice(slashIndex + 1) : path;
@@ -411,7 +429,7 @@ export class SyncService {
 		let candidate = `${candidateBase}${extension}`;
 		let suffix = 2;
 
-		while (this.app.vault.getAbstractFileByPath(candidate)) {
+		while (await this.localPathExists(candidate)) {
 			candidate = `${candidateBase} ${suffix}${extension}`;
 			suffix += 1;
 		}
@@ -674,6 +692,7 @@ export class SyncService {
 
 			try {
 				await this.syncFilePaths(pendingPaths);
+				await this.syncObsidianConfigurationFiles();
 			} catch (error) {
 				for (const path of pendingPaths) {
 					this.pendingSyncPaths.add(path);
@@ -747,6 +766,7 @@ export class SyncService {
 
 			try {
 				await this.syncFilePaths(pendingPaths);
+				await this.syncObsidianConfigurationFiles();
 			} catch (error) {
 				for (const path of pendingPaths) {
 					this.pendingSyncPaths.add(path);
@@ -759,7 +779,7 @@ export class SyncService {
 			const localRecordsById = new Map(localRecordsBeforePull.map(
 				(record) => [record._id, record])
 			);
-			const localVaultRecordIds = this.listCurrentVaultFileRecordIds();
+			const localVaultRecordIds = await this.listCurrentVaultFileRecordIds();
 			const recordIdsBeforePull = Array.from(new Set([
 				...await this.store.listAllFileRecordIds(),
 				...localVaultRecordIds
@@ -809,8 +829,12 @@ export class SyncService {
 			await this.store.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pullFromCouchDb");
 
+			const reloadMessage = restoreResult.configurationChanged
+				|| deletionResult.configurationChanged
+				? " Reload Obsidian to apply configuration changes."
+				: "";
 			new Notice(
-				`Read ${pullResult.docsRead}. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.`
+				`Read ${pullResult.docsRead}. Restored ${restoreResult.restored}, deleted ${deletionResult.deleted}, skipped ${skipped}, conflicts ${conflicts}.${reloadMessage}`
 			);
 		} catch (error) {
 			logger.error("CouchDB pull failed", error);
@@ -843,7 +867,7 @@ export class SyncService {
 			const rawPath = getPathFromFileRecordId(state.recordId);
 			const path = rawPath ? normalizeRestoredPath(rawPath) : "";
 
-			if (!path || isSyncBlacklistedPath(path) || !isPathInsideSyncFolder(path, this.getCurrentSyncFolder())) {
+			if (!path || isSyncBlacklistedPath(path) || !this.isPathInsideCurrentSyncScope(path)) {
 				continue;
 			}
 
@@ -866,7 +890,7 @@ export class SyncService {
 				continue;
 			} else if (existingConflict) {
 				conflictKind = existingConflict.kind;
-			} else if (liveLeaves.length > 0 && this.hasRestorePathCollision(path)) {
+			} else if (liveLeaves.length > 0 && await this.hasRestorePathCollision(path)) {
 				conflictKind = "path-collision";
 			} else if (liveLeaves.length > 1) {
 				conflictKind = stateBeforePull?.leaves.every((leaf) => leaf.deleted) || !localVariant.exists
@@ -926,13 +950,12 @@ export class SyncService {
 	}
 
 	private async captureLocalVariant(path: string): Promise<SyncConflictLocalVariant> {
-		const abstractFile = this.app.vault.getAbstractFileByPath(path);
+		const record = await this.createLocalRecord(path);
 
-		if (!(abstractFile instanceof TFile)) {
+		if (!record) {
 			return { exists: false };
 		}
 
-		const record = await createFileRecord(this.app, abstractFile);
 		return {
 			exists: true,
 			contentHash: record.contentHash,
@@ -954,12 +977,14 @@ export class SyncService {
 			return true;
 		}
 
-		const abstractFile = this.app.vault.getAbstractFileByPath(path);
-		return abstractFile instanceof TFile
-			&& !(await this.localFileMatchesRecord(abstractFile, localRecord));
+		return !(await this.localPathMatchesRecord(path, localRecord));
 	}
 
-	private hasRestorePathCollision(path: string) {
+	private async hasRestorePathCollision(path: string) {
+		if (isObsidianConfigFilePath(this.app, path)) {
+			return (await this.app.vault.adapter.stat(path))?.type === "folder";
+		}
+
 		const existing = this.app.vault.getAbstractFileByPath(path);
 
 		if (existing && !(existing instanceof TFile)) {
@@ -988,6 +1013,7 @@ export class SyncService {
 		let deleted = 0;
 		let skipped = 0;
 		let conflicts = 0;
+		let configurationChanged = false;
 		const uniqueDeletedRecordIds = Array.from(new Set(deletedRecordIds));
 
 		this.applyingRemoteChange = true;
@@ -998,6 +1024,9 @@ export class SyncService {
 
 				if (deleteStatus === "deleted") {
 					deleted += 1;
+					const rawPath = getPathFromFileRecordId(recordId);
+					configurationChanged = configurationChanged
+						|| (rawPath !== null && isObsidianConfigFilePath(this.app, rawPath));
 				} else if (deleteStatus === "conflict") {
 					conflicts += 1;
 				} else {
@@ -1021,7 +1050,8 @@ export class SyncService {
 			total: uniqueDeletedRecordIds.length,
 			deleted,
 			skipped,
-			conflicts
+			conflicts,
+			configurationChanged
 		};
 	}
 
@@ -1036,29 +1066,36 @@ export class SyncService {
 		}
 
 		const path = normalizeRestoredPath(rawPath);
-		const syncFolder = this.getCurrentSyncFolder();
-
-		if (!path || isSyncBlacklistedPath(path) || !isPathInsideSyncFolder(path, syncFolder)) {
+		if (!path || isSyncBlacklistedPath(path) || !this.isPathInsideCurrentSyncScope(path)) {
 			return "skipped";
 		}
 
-		const existingFile = this.app.vault.getAbstractFileByPath(path);
 		const localRecord = localRecordsById.get(recordId);
+		const configFile = isObsidianConfigFilePath(this.app, path);
+		const existingFile = configFile
+			? await this.app.vault.adapter.stat(path)
+			: null;
+		const existingVaultFile = configFile
+			? null
+			: this.app.vault.getAbstractFileByPath(path);
 
-		if (!existingFile) {
+		if (!existingFile && !existingVaultFile) {
 			await this.store.deleteFileRecordById(recordId);
 			return "skipped";
 		}
 
-		if (!(existingFile instanceof TFile)) {
+		if (
+			(existingFile && existingFile.type !== "file")
+			|| (existingVaultFile && !(existingVaultFile instanceof TFile))
+		) {
 			return "conflict";
 		}
 
-		if (localRecord && !(await this.localFileMatchesRecord(existingFile, localRecord))) {
+		if (localRecord && !(await this.localPathMatchesRecord(path, localRecord))) {
 			return "conflict";
 		}
 
-		await this.app.fileManager.trashFile(existingFile);
+		await this.deleteLocalFile(path);
 		await this.store.deleteFileRecordById(recordId);
 		return "deleted";
 	}
@@ -1070,6 +1107,26 @@ export class SyncService {
 		]);
 
 		return localHash === recordHash;
+	}
+
+	private async localPathMatchesRecord(path: string, record: VaultFileRecord) {
+		if (record.source === "obsidian-config" || isObsidianConfigFilePath(this.app, path)) {
+			const stat = await this.app.vault.adapter.stat(path);
+
+			if (!stat || stat.type !== "file") {
+				return false;
+			}
+
+			const [localHash, recordHash] = await Promise.all([
+				createAdapterFileContentHash(this.app, path),
+				getRecordContentHash(record)
+			]);
+
+			return localHash === recordHash;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(path);
+		return file instanceof TFile && this.localFileMatchesRecord(file, record);
 	}
 
 	async testCouchDbConnection() {
@@ -1174,19 +1231,81 @@ export class SyncService {
 			});
 		}
 
-		await this.store.markLocalSyncBaseline(syncFolder);
-
-		return {
+		const result = await this.syncObsidianConfigurationFiles({
 			total: files.length,
 			saved: savedCount,
 			skipped: skippedCount
-		};
+		});
+		await this.store.markLocalSyncBaseline(syncFolder);
+
+		return result;
+	}
+
+	private async syncObsidianConfigurationFiles(
+		initialResult: LocalSyncResult = { total: 0, saved: 0, skipped: 0 }
+	): Promise<LocalSyncResult> {
+		const paths = await listObsidianConfigFilePaths(this.app);
+		const currentRecordIds = new Set(paths.map(createFileRecordId));
+		const missingRecords = (await this.store.listFileRecords()).filter(
+			(record) => record.source === "obsidian-config"
+				&& !currentRecordIds.has(record._id)
+				&& !this.conflictedPaths.has(record.path)
+		);
+		const total = initialResult.total + paths.length + missingRecords.length;
+		let saved = initialResult.saved;
+		let skipped = initialResult.skipped;
+		let current = initialResult.total;
+
+		logger.info("Obsidian configuration files collected for sync", {
+			configDir: this.app.vault.configDir,
+			files: paths.length,
+			deleted: missingRecords.length
+		});
+
+		for (const path of paths) {
+			const changed = this.conflictedPaths.has(path)
+				? false
+				: await this.store.saveFileRecordIfChanged(
+					await createObsidianConfigFileRecord(this.app, path)
+				);
+
+			if (changed) {
+				saved += 1;
+			} else {
+				skipped += 1;
+			}
+
+			current += 1;
+			this.onStatusChange({
+				state: "syncing",
+				current,
+				total,
+				saved,
+				skipped
+			});
+		}
+
+		for (const record of missingRecords) {
+			await this.store.deleteFileRecordById(record._id);
+			saved += 1;
+			current += 1;
+			this.onStatusChange({
+				state: "syncing",
+				current,
+				total,
+				saved,
+				skipped
+			});
+		}
+
+		return { total, saved, skipped };
 	}
 
 	private async restoreVaultFiles(deletedRecordIds = new Set<string>()): Promise<RestoreResult> {
 		let restored = 0;
 		let skipped = 0;
 		let conflicts = 0;
+		let configurationChanged = false;
 
 		const records = await this.store.listFileRecords();
 		this.applyingRemoteChange = true;
@@ -1204,6 +1323,8 @@ export class SyncService {
 
 				if (restoreStatus === "restored") {
 					restored += 1;
+					configurationChanged = configurationChanged
+						|| isObsidianConfigFilePath(this.app, record.path);
 				} else if (restoreStatus === "conflict") {
 					conflicts += 1;
 				} else {
@@ -1227,21 +1348,40 @@ export class SyncService {
 			total: records.length,
 			restored,
 			skipped,
-			conflicts
+			conflicts,
+			configurationChanged
 		};
 	}
 
 	private async restoreVaultFile(record: VaultFileRecord): Promise<"restored" | "skipped" | "conflict"> {
 		const path = normalizeRestoredPath(record.path);
-		const syncFolder = this.getCurrentSyncFolder();
 
 		if (
 			!path
 			|| record.type !== "vault-file"
 			|| isSyncBlacklistedPath(path)
-			|| !isPathInsideSyncFolder(path, syncFolder)
+			|| !this.isPathInsideCurrentSyncScope(path)
 		) {
 			return "skipped";
+		}
+
+		if (record.source === "obsidian-config" || isObsidianConfigFilePath(this.app, path)) {
+			if (!isObsidianConfigFilePath(this.app, path)) {
+				return "skipped";
+			}
+
+			const existing = await this.app.vault.adapter.stat(path);
+
+			if (existing?.type === "folder") {
+				return "conflict";
+			}
+
+			if (existing?.type === "file" && await this.localPathMatchesRecord(path, record)) {
+				return "skipped";
+			}
+
+			await this.writeRecordToVault(record, path);
+			return "restored";
 		}
 
 		const existingFile = this.app.vault.getAbstractFileByPath(path);
@@ -1490,7 +1630,7 @@ export class SyncService {
 		return isSyncableVaultFile(file) && isFileInsideSyncFolder(file, this.getCurrentSyncFolder());
 	}
 
-	private listCurrentVaultFileRecordIds() {
+	private async listCurrentVaultFileRecordIds() {
 		const syncFolder = this.getCurrentSyncFolder();
 		const syncFolderState = getSyncFolderState(this.app, syncFolder);
 
@@ -1498,12 +1638,76 @@ export class SyncService {
 			throw new Error(syncFolderState.message);
 		}
 
-		return collectSyncableFilesInFolder(syncFolderState.folder).map((file) => createFileRecordId(file.path));
+		const [vaultRecordIds, configPaths] = await Promise.all([
+			Promise.resolve(
+				collectSyncableFilesInFolder(syncFolderState.folder)
+					.map((file) => createFileRecordId(file.path))
+			),
+			listObsidianConfigFilePaths(this.app)
+		]);
+
+		return [
+			...vaultRecordIds,
+			...configPaths.map(createFileRecordId)
+		];
 	}
 
 	private getCurrentSyncFolder() {
 		const settings = this.getSettings();
 		return getSyncFolder(this.app, settings.syncFolderMode, settings.customSyncFolder);
+	}
+
+	private isPathInsideCurrentSyncScope(path: string) {
+		return isObsidianConfigFilePath(this.app, path)
+			|| isPathInsideSyncFolder(path, this.getCurrentSyncFolder());
+	}
+
+	private async createLocalRecord(path: string) {
+		if (isObsidianConfigFilePath(this.app, path)) {
+			const stat = await this.app.vault.adapter.stat(path);
+			return stat?.type === "file"
+				? createObsidianConfigFileRecord(this.app, path)
+				: null;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(path);
+		return file instanceof TFile ? createFileRecord(this.app, file) : null;
+	}
+
+	private async localPathExists(path: string) {
+		if (isObsidianConfigFilePath(this.app, path)) {
+			return this.app.vault.adapter.exists(path);
+		}
+
+		return this.app.vault.getAbstractFileByPath(path) !== null;
+	}
+
+	private async deleteLocalFile(path: string) {
+		if (isObsidianConfigFilePath(this.app, path)) {
+			const stat = await this.app.vault.adapter.stat(path);
+
+			if (!stat) {
+				return;
+			}
+
+			if (stat.type !== "file") {
+				throw new Error(`Cannot delete ${path}: the path is not a file.`);
+			}
+
+			if (!(await this.app.vault.adapter.trashSystem(path))) {
+				await this.app.vault.adapter.trashLocal(path);
+			}
+
+			return;
+		}
+
+		const existing = this.app.vault.getAbstractFileByPath(path);
+
+		if (existing instanceof TFile) {
+			await this.app.fileManager.trashFile(existing);
+		} else if (existing) {
+			throw new Error(`Cannot delete ${path}: the path is not a file.`);
+		}
 	}
 
 	private async syncFileIfChanged(file: TFile) {
