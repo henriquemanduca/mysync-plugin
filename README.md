@@ -193,6 +193,17 @@ npm run build
 `npm run build` runs TypeScript checks and produces the bundled plugin files in
 `dist/`.
 
+Run the unit tests:
+
+```sh
+npm test
+```
+
+Use `npm run test:watch` while developing, `npm run test:coverage` to generate
+the coverage report, or `npm run check` to run the production build, test type
+checks, and unit tests together. See [TESTING.md](TESTING.md) for the incremental
+testing roadmap and mock boundaries.
+
 For local Obsidian testing, reload Obsidian after starting the development
 build, then enable the plugin from community plugin settings.
 
