@@ -76,13 +76,17 @@ export class Logger {
 		const prefix = `[MySync:${this.scope}] ${message}`;
 		const sanitizedContext = sanitizeForLog(context);
 		const sanitizedError = sanitizeForLog(error);
-		const args: unknown[] = sanitizedContext ? [prefix, sanitizedContext] : [prefix];
 
-		if (sanitizedError !== undefined) {
-			args.push(sanitizedError);
+		if (level === "error") {
+			const args: unknown[] = sanitizedContext ? [prefix, sanitizedContext] : [prefix];
+
+			if (sanitizedError !== undefined) {
+				args.push(sanitizedError);
+			}
+
+			console.error(...args);
 		}
 
-		console[level](...args);
 		Logger.enqueueFileWrite(formatLogLine(level, this.scope, message, sanitizedContext, sanitizedError));
 	}
 
@@ -104,7 +108,7 @@ export class Logger {
 		Logger.writeQueue = Logger.writeQueue
 			.then(() => adapter.append(path, line))
 			.catch((error) => {
-				console.warn("[MySync:Logger] Failed to write log file", error);
+				console.error("[MySync:Logger] Failed to write log file", error);
 			});
 	}
 }

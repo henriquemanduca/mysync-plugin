@@ -431,7 +431,7 @@ export class PouchDbFileStore {
 
 	async resolveFileRecordWithContent(
 		recordId: string,
-		sourceRecord: VaultFileRecord,
+		sourceRecord: VaultFileRecord & { _rev?: string; _deleted?: boolean },
 		resolvedBy: string,
 		strategy: ConflictResolutionStrategy
 	) {
@@ -443,8 +443,7 @@ export class PouchDbFileStore {
 				throw new Error(`Cannot resolve ${recordId}: winning revision not found.`);
 			}
 
-			const source = sourceRecord as VaultFileRecord & { _rev?: string; _deleted?: boolean };
-			const { _rev: ignoredRevision, _deleted: ignoredDeletion, ...recordBody } = source;
+			const { _rev: ignoredRevision, _deleted: ignoredDeletion, ...recordBody } = sourceRecord;
 			void ignoredRevision;
 			void ignoredDeletion;
 

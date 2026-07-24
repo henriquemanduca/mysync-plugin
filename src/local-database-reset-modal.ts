@@ -1,4 +1,5 @@
 import { Modal, Setting } from "obsidian";
+import { setDestructiveButton } from "./utils/button";
 
 export class LocalDatabaseResetModal extends Modal {
 	private resetting = false;
@@ -50,12 +51,13 @@ export class LocalDatabaseResetModal extends Modal {
 			.setButtonText("Cancel")
 			.setDisabled(this.resetting)
 			.onClick(() => this.close()));
-		actions.addButton((button) => button
-			.setButtonText(this.resetting ? "Resetting..." : "Reset local databases")
-			.setWarning()
-			.setCta()
-			.setDisabled(this.resetting)
-			.onClick(() => void this.runReset()));
+		actions.addButton((button) => {
+			button.setButtonText(this.resetting ? "Resetting..." : "Reset local databases");
+			setDestructiveButton(button)
+				.setCta()
+				.setDisabled(this.resetting)
+				.onClick(() => void this.runReset());
+		});
 	}
 
 	private addDatabaseName(containerEl: HTMLElement, label: string, databaseName: string) {

@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type { SettingDefinitionItem, SettingGroupItem } from "obsidian";
 import type MySyncPlugin from "./main";
+import { setDestructiveButton } from "./utils/button";
 import { formatDateTime } from "./utils/date-format";
 import type { LoggerLevel } from "./utils/logger";
 
@@ -42,10 +43,6 @@ function isSyncFolderMode(value: string): value is SyncFolderMode {
 	return value === "vault-root" || value === "custom";
 }
 
-function supportsDeclarativeSettings() {
-	return typeof (PluginSettingTab.prototype as { getSettingDefinitions?: unknown }).getSettingDefinitions === "function";
-}
-
 function refreshDomStateIfAvailable(settingTab: PluginSettingTab) {
 	const refreshDomState = (settingTab as unknown as { refreshDomState?: () => void }).refreshDomState;
 	refreshDomState?.call(settingTab);
@@ -57,10 +54,10 @@ export class MySyncSettingTab extends PluginSettingTab {
 	constructor(app: App, plugin: MySyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
+	}
 
-		if (!supportsDeclarativeSettings()) {
-			(this as unknown as { display: () => void }).display = () => this.renderLegacySettings();
-		}
+	display(): void {
+		this.renderLegacySettings();
 	}
 
 	getSettingDefinitions(): SettingDefinitionItem[] {
@@ -127,7 +124,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					},
 					{
 						name: "Log level",
-						desc: "Minimum level written to the console and mysync.log.",
+						desc: "Minimum level written to mysync.log. Errors are also written to the developer console.",
 						control: {
 							type: "dropdown",
 							key: "logLevel",
@@ -172,10 +169,11 @@ export class MySyncSettingTab extends PluginSettingTab {
 						name: "Reset local databases",
 						desc: "Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.",
 						render: (setting) => {
-							setting.addButton((button) => button
-								.setButtonText("Reset local databases")
-								.setWarning()
-								.onClick(() => this.plugin.openLocalDatabaseResetModal()));
+							setting.addButton((button) => {
+								button.setButtonText("Reset local databases");
+								setDestructiveButton(button)
+									.onClick(() => this.plugin.openLocalDatabaseResetModal());
+							});
 						}
 					}
 				]
@@ -376,7 +374,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 		new Setting(localSectionEl)
 			.setName("Log level")
-			.setDesc("Minimum level written to the console and mysync.log.")
+			.setDesc("Minimum level written to mysync.log. Errors are also written to the developer console.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("debug", "Debug")
@@ -421,10 +419,11 @@ export class MySyncSettingTab extends PluginSettingTab {
 		new Setting(localDataSectionEl)
 			.setName("Reset local databases")
 			.setDesc("Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.")
-			.addButton((button) => button
-				.setButtonText("Reset local databases")
-				.setWarning()
-				.onClick(() => this.plugin.openLocalDatabaseResetModal()));
+			.addButton((button) => {
+				button.setButtonText("Reset local databases");
+				setDestructiveButton(button)
+					.onClick(() => this.plugin.openLocalDatabaseResetModal());
+			});
 
 		new Setting(remoteSectionEl)
 			.setName("CouchDB URL")

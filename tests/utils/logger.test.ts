@@ -12,10 +12,10 @@ describe("Logger", () => {
 	});
 
 	it("redacts sensitive and nested values before logging", () => {
-		const logSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const logger = new Logger("Test");
 
-		logger.info("Connected", {
+		logger.error("Connection failed", undefined, {
 			apiToken: "token-value",
 			nested: {
 				password: "password-value",
@@ -23,7 +23,7 @@ describe("Logger", () => {
 			}
 		});
 
-		expect(logSpy).toHaveBeenCalledWith("[MySync:Test] Connected", {
+		expect(errorSpy).toHaveBeenCalledWith("[MySync:Test] Connection failed", {
 			apiToken: "[REDACTED]",
 			nested: {
 				password: "[REDACTED]",
@@ -33,7 +33,6 @@ describe("Logger", () => {
 	});
 
 	it("does not write messages below the configured level", () => {
-		const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => undefined);
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 		const logger = new Logger("Test");
 		Logger.setLevel("error");
@@ -41,7 +40,24 @@ describe("Logger", () => {
 		logger.debug("Skipped");
 		logger.error("Written");
 
-		expect(debugSpy).not.toHaveBeenCalled();
 		expect(errorSpy).toHaveBeenCalledOnce();
+	});
+
+	it("does not write non-error messages to the console", () => {
+		const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+		const infoSpy = vi.spyOn(console, "info").mockImplementation(() => undefined);
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+		const logger = new Logger("Test");
+
+		logger.debug("Debug");
+		logger.log("Log");
+		logger.info("Info");
+		logger.warn("Warning");
+
+		expect(debugSpy).not.toHaveBeenCalled();
+		expect(logSpy).not.toHaveBeenCalled();
+		expect(infoSpy).not.toHaveBeenCalled();
+		expect(warnSpy).not.toHaveBeenCalled();
 	});
 });
