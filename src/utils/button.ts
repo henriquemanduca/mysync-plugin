@@ -1,8 +1,11 @@
 import type { ButtonComponent } from "obsidian";
 
 export function setDestructiveButton(button: ButtonComponent): ButtonComponent {
-	if (typeof button.setDestructive === "function") {
-		return button.setDestructive();
+	const setDestructive: unknown = Reflect.get(button, "setDestructive");
+
+	if (typeof setDestructive === "function") {
+		setDestructive.call(button);
+		return button;
 	}
 
 	button.buttonEl.addClass("mod-warning");
