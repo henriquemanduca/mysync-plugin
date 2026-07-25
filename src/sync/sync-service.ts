@@ -85,6 +85,25 @@ export type CompletedSyncOperation =
 	| "resetLocalDatabases";
 
 const logger = new Logger("SyncService");
+const SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES = new Set([
+	"app.json",
+	"hotkeys.json",
+	"workspace.json"
+]);
+
+function isSyncedObsidianConfigurationFilePath(app: App, path: string) {
+	if (!isObsidianConfigFilePath(app, path)) {
+		return false;
+	}
+
+	const fileName = path.slice(path.lastIndexOf("/") + 1);
+	return SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES.has(fileName);
+}
+
+function isExcludedObsidianConfigurationFilePath(app: App, path: string) {
+	return isObsidianConfigFilePath(app, path)
+		&& !isSyncedObsidianConfigurationFilePath(app, path);
+}
 
 export class SyncService {
 	private syncInProgress = false;
@@ -95,7 +114,7 @@ export class SyncService {
 
 	constructor(
 		private app: App,
-		private store: PouchDbFileStore,
+		private localStore: PouchDbFileStore,
 		private conflictStore: PouchDbConflictStore,
 		private getSettings: () => MySyncSettings,
 		private onStatusChange: (status: SyncStatus) => void,
@@ -107,11 +126,14 @@ export class SyncService {
 
 	async initialize() {
 		await this.conflictStore.ensureDatabaseExists();
+		await this.cleanupExcludedObsidianConfigurationRecords();
 		await this.refreshActiveConflicts();
 	}
 
 	async listActiveConflicts() {
-		return this.conflictStore.listActiveConflicts();
+		return (await this.conflictStore.listActiveConflicts()).filter(
+			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+		);
 	}
 
 	async resolveConflict(
@@ -145,7 +167,7 @@ export class SyncService {
 				error: undefined
 			}));
 
-			const [currentState] = await this.store.listFileRevisionStates([conflict.recordId]);
+			const [currentState] = await this.localStore.listFileRevisionStates([conflict.recordId]);
 			const currentRevisions = currentState?.leaves.map((leaf) => leaf.revision).sort() ?? [];
 
 			if (!arraysEqual(currentRevisions, conflict.observedLeafRevisions)) {
@@ -269,7 +291,7 @@ export class SyncService {
 			if (strategy === "delete") {
 				await this.deleteLocalFile(conflict.path);
 
-				await this.store.resolveFileRecordAsDeleted(conflict.recordId);
+				await this.localStore.resolveFileRecordAsDeleted(conflict.recordId);
 				return [conflict.recordId];
 			}
 
@@ -280,7 +302,7 @@ export class SyncService {
 					throw new Error(`Local file not found: ${conflict.path}`);
 				}
 
-				await this.store.resolveFileRecordWithContent(
+				await this.localStore.resolveFileRecordWithContent(
 					conflict.recordId,
 					localRecord,
 					this.getSettings().localVaultId,
@@ -297,7 +319,7 @@ export class SyncService {
 				throw new Error("No live revision is available for this resolution.");
 			}
 
-			const remoteRecord = await this.store.getFileRevision(conflict.recordId, remoteRevision);
+			const remoteRecord = await this.localStore.getFileRevision(conflict.recordId, remoteRevision);
 
 			if (!remoteRecord) {
 				throw new Error("The selected remote revision is no longer available.");
@@ -318,8 +340,8 @@ export class SyncService {
 					throw new Error(`Failed to create conflict copy: ${copyPath}`);
 				}
 
-				await this.store.saveFileRecordIfChanged(copyRecord);
-				await this.store.resolveFileRecordWithContent(
+				await this.localStore.saveFileRecordIfChanged(copyRecord);
+				await this.localStore.resolveFileRecordWithContent(
 					conflict.recordId,
 					localRecord,
 					this.getSettings().localVaultId,
@@ -329,7 +351,7 @@ export class SyncService {
 			}
 
 			await this.writeRecordToVault(remoteRecord, conflict.path);
-			await this.store.resolveFileRecordWithContent(
+			await this.localStore.resolveFileRecordWithContent(
 				conflict.recordId,
 				remoteRecord,
 				this.getSettings().localVaultId,
@@ -342,7 +364,7 @@ export class SyncService {
 	}
 
 	private async pushResolvedConflict(connection: CouchDbConnection, documentIds: string[]) {
-		await this.store.pushToCouchDb(
+		await this.localStore.pushToCouchDb(
 			connection,
 			(docsWritten) => this.onStatusChange({ state: "pushing", docsWritten }),
 			{ docIds: documentIds }
@@ -438,7 +460,9 @@ export class SyncService {
 	}
 
 	private async refreshActiveConflicts() {
-		const conflicts = await this.conflictStore.listActiveConflicts();
+		const conflicts = (await this.conflictStore.listActiveConflicts()).filter(
+			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+		);
 		this.conflictedPaths = new Set(conflicts.map((conflict) => conflict.path));
 		this.onConflictsChanged(conflicts);
 	}
@@ -467,7 +491,7 @@ export class SyncService {
 
 		try {
 			logger.warn("Local database reset started");
-			await this.store.reset();
+			await this.localStore.reset();
 			await this.conflictStore.reset();
 			await this.refreshActiveConflicts();
 
@@ -575,7 +599,7 @@ export class SyncService {
 			});
 
 			const connection = createCouchDbConnection(settings);
-			const canPush = await this.store.canPushToCouchDb(connection);
+			const canPush = await this.localStore.canPushToCouchDb(connection);
 
 			if (!canPush) {
 				failed = true;
@@ -595,7 +619,7 @@ export class SyncService {
 				database: connection.database
 			});
 
-			const pushResult = await this.store.pushToCouchDb(
+			const pushResult = await this.localStore.pushToCouchDb(
 				connection,
 				(docsWritten) => {
 					this.onStatusChange({
@@ -614,7 +638,7 @@ export class SyncService {
 				docsWritten: pushResult.docsWritten
 			});
 
-			await this.store.markRemoteBaseline(connection);
+			await this.localStore.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pushToCouchDb");
 
 			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
@@ -670,8 +694,8 @@ export class SyncService {
 			const connection = createCouchDbConnection(settings);
 			const syncFolder = this.getCurrentSyncFolder();
 			const [hasLocalSyncBaseline, hasRemoteBaseline] = await Promise.all([
-				this.store.hasLocalSyncBaseline(syncFolder),
-				this.store.hasRemoteBaseline(connection)
+				this.localStore.hasLocalSyncBaseline(syncFolder),
+				this.localStore.hasRemoteBaseline(connection)
 			]);
 			const blockingState = getPendingPushBlockingState(
 				hasLocalSyncBaseline,
@@ -701,7 +725,7 @@ export class SyncService {
 				throw error;
 			}
 
-			const pushResult = await this.store.pushToCouchDb(
+			const pushResult = await this.localStore.pushToCouchDb(
 				connection,
 				(docsWritten) => {
 					this.onStatusChange({
@@ -775,18 +799,19 @@ export class SyncService {
 				throw error;
 			}
 
-			const localRecordsBeforePull = await this.store.listFileRecords();
+			logger.debug("Executing pull from CouchDb");
+			const localRecordsBeforePull = await this.localStore.listFileRecords();
 			const localRecordsById = new Map(localRecordsBeforePull.map(
 				(record) => [record._id, record])
 			);
 			const localVaultRecordIds = await this.listCurrentVaultFileRecordIds();
 			const recordIdsBeforePull = Array.from(new Set([
-				...await this.store.listAllFileRecordIds(),
+				...await this.localStore.listAllFileRecordIds(),
 				...localVaultRecordIds
 			]));
-			const revisionStatesBeforePull = await this.store.listFileRevisionStates(recordIdsBeforePull);
+			const revisionStatesBeforePull = await this.localStore.listFileRevisionStates(recordIdsBeforePull);
 
-			const pullResult = await this.store.pullFromCouchDb(
+			const pullResult = await this.localStore.pullFromCouchDb(
 				connection,
 				(docsRead) => {
 					this.onStatusChange({
@@ -798,9 +823,10 @@ export class SyncService {
 
 			const recordIdsAfterPull = Array.from(new Set([
 				...recordIdsBeforePull,
-				...await this.store.listAllFileRecordIds()
+				...await this.localStore.listAllFileRecordIds()
 			]));
-			const revisionStatesAfterPull = await this.store.listFileRevisionStates(recordIdsAfterPull);
+			const revisionStatesAfterPull = await this.localStore.listFileRevisionStates(recordIdsAfterPull);
+			await this.cleanupExcludedObsidianConfigurationRecords(revisionStatesAfterPull);
 			const classification = await this.classifyPullResults(
 				revisionStatesBeforePull,
 				revisionStatesAfterPull,
@@ -826,7 +852,7 @@ export class SyncService {
 				skipped,
 				conflicts
 			});
-			await this.store.markRemoteBaseline(connection);
+			await this.localStore.markRemoteBaseline(connection);
 			await this.onOperationCompleted("pullFromCouchDb");
 
 			const reloadMessage = restoreResult.configurationChanged
@@ -856,7 +882,9 @@ export class SyncService {
 		localRecordsById: Map<string, VaultFileRecord>
 	): Promise<PullClassification> {
 		const statesBeforeById = new Map(statesBeforePull.map((state) => [state.recordId, state]));
-		const activeConflicts = await this.conflictStore.listActiveConflicts();
+		const activeConflicts = (await this.conflictStore.listActiveConflicts()).filter(
+			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+		);
 		const activeConflictsByRecordId = new Map(activeConflicts.map(
 			(conflict) => [conflict.recordId, conflict]
 		));
@@ -947,6 +975,54 @@ export class SyncService {
 			deletedRecordIds: deletedRecordIds.filter((recordId) => !conflictedRecordIds.has(recordId)),
 			conflictedRecordIds
 		};
+	}
+
+	private async cleanupExcludedObsidianConfigurationRecords(
+		revisionStates: FileRevisionState[] = []
+	) {
+		const activeConflicts = await this.conflictStore.listActiveConflicts();
+		const excludedConflicts = activeConflicts.filter(
+			(conflict) => isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+		);
+		const excludedRecordIds = new Set(
+			revisionStates.flatMap((state) => {
+				const rawPath = getPathFromFileRecordId(state.recordId);
+				const path = rawPath ? normalizeRestoredPath(rawPath) : "";
+
+				return path && isExcludedObsidianConfigurationFilePath(this.app, path)
+					? [state.recordId]
+					: [];
+			})
+		);
+
+		for (const conflict of excludedConflicts) {
+			excludedRecordIds.add(conflict.recordId);
+		}
+
+		for (const recordId of excludedRecordIds) {
+			await this.localStore.resolveFileRecordAsDeleted(recordId);
+		}
+
+		for (const conflict of excludedConflicts) {
+			const resolvedAt = new Date().toISOString();
+			await this.conflictStore.updateConflict(conflict._id, (current) => ({
+				...current,
+				status: "resolved",
+				resolution: {
+					strategy: "delete",
+					resolvedDocumentIds: [conflict.recordId],
+					resolvedAt
+				},
+				error: undefined
+			}));
+		}
+
+		if (excludedRecordIds.size > 0) {
+			logger.info("Excluded Obsidian configuration records cleaned up", {
+				records: excludedRecordIds.size,
+				conflicts: excludedConflicts.length
+			});
+		}
 	}
 
 	private async captureLocalVariant(path: string): Promise<SyncConflictLocalVariant> {
@@ -1080,7 +1156,7 @@ export class SyncService {
 			: this.app.vault.getAbstractFileByPath(path);
 
 		if (!existingFile && !existingVaultFile) {
-			await this.store.deleteFileRecordById(recordId);
+			await this.localStore.deleteFileRecordById(recordId);
 			return "skipped";
 		}
 
@@ -1096,7 +1172,7 @@ export class SyncService {
 		}
 
 		await this.deleteLocalFile(path);
-		await this.store.deleteFileRecordById(recordId);
+		await this.localStore.deleteFileRecordById(recordId);
 		return "deleted";
 	}
 
@@ -1150,7 +1226,7 @@ export class SyncService {
 		try {
 			this.onStatusChange({ state: "testing" });
 
-			const result = await this.store.testCouchDbConnection({
+			const result = await this.localStore.testCouchDbConnection({
 				url: settings.couchDbUrl,
 				database: settings.couchDbDatabase,
 				username: settings.couchDbUsername,
@@ -1236,7 +1312,7 @@ export class SyncService {
 			saved: savedCount,
 			skipped: skippedCount
 		});
-		await this.store.markLocalSyncBaseline(syncFolder);
+		await this.localStore.markLocalSyncBaseline(syncFolder);
 
 		return result;
 	}
@@ -1244,19 +1320,25 @@ export class SyncService {
 	private async syncObsidianConfigurationFiles(
 		initialResult: LocalSyncResult = { total: 0, saved: 0, skipped: 0 }
 	): Promise<LocalSyncResult> {
-		const paths = await listObsidianConfigFilePaths(this.app);
+		logger.debug("Executing sync for configuration");
+
+		const paths = (await listObsidianConfigFilePaths(this.app))
+			.filter((path) => isSyncedObsidianConfigurationFilePath(this.app, path));
+
 		const currentRecordIds = new Set(paths.map(createFileRecordId));
-		const missingRecords = (await this.store.listFileRecords()).filter(
+
+		const missingRecords = (await this.localStore.listFileRecords()).filter(
 			(record) => record.source === "obsidian-config"
 				&& !currentRecordIds.has(record._id)
 				&& !this.conflictedPaths.has(record.path)
 		);
+
 		const total = initialResult.total + paths.length + missingRecords.length;
 		let saved = initialResult.saved;
 		let skipped = initialResult.skipped;
 		let current = initialResult.total;
 
-		logger.info("Obsidian configuration files collected for sync", {
+		logger.info("Configuration files collected: ", {
 			configDir: this.app.vault.configDir,
 			files: paths.length,
 			deleted: missingRecords.length
@@ -1265,7 +1347,7 @@ export class SyncService {
 		for (const path of paths) {
 			const changed = this.conflictedPaths.has(path)
 				? false
-				: await this.store.saveFileRecordIfChanged(
+				: await this.localStore.saveFileRecordIfChanged(
 					await createObsidianConfigFileRecord(this.app, path)
 				);
 
@@ -1286,7 +1368,7 @@ export class SyncService {
 		}
 
 		for (const record of missingRecords) {
-			await this.store.deleteFileRecordById(record._id);
+			await this.localStore.deleteFileRecordById(record._id);
 			saved += 1;
 			current += 1;
 			this.onStatusChange({
@@ -1302,12 +1384,14 @@ export class SyncService {
 	}
 
 	private async restoreVaultFiles(deletedRecordIds = new Set<string>()): Promise<RestoreResult> {
+		logger.debug("Restoring vault files: ", { deletedRecordIds });
+
 		let restored = 0;
 		let skipped = 0;
 		let conflicts = 0;
 		let configurationChanged = false;
 
-		const records = await this.store.listFileRecords();
+		const records = await this.localStore.listFileRecords();
 		this.applyingRemoteChange = true;
 
 		try {
@@ -1323,8 +1407,7 @@ export class SyncService {
 
 				if (restoreStatus === "restored") {
 					restored += 1;
-					configurationChanged = configurationChanged
-						|| isObsidianConfigFilePath(this.app, record.path);
+					configurationChanged = configurationChanged || isObsidianConfigFilePath(this.app, record.path);
 				} else if (restoreStatus === "conflict") {
 					conflicts += 1;
 				} else {
@@ -1487,7 +1570,7 @@ export class SyncService {
 		}
 
 		if (!isSyncBlacklistedPath(oldPath)) {
-			await this.store.deleteFileRecordByPath(oldPath);
+			await this.localStore.deleteFileRecordByPath(oldPath);
 		}
 
 		this.queueFileSync(abstractFile);
@@ -1502,7 +1585,7 @@ export class SyncService {
 			abstractFile instanceof TFile
 			&& this.isFileInsideCurrentSyncFolder(abstractFile)
 		) {
-			await this.store.deleteFileRecordByPath(abstractFile.path);
+			await this.localStore.deleteFileRecordByPath(abstractFile.path);
 		}
 	}
 
@@ -1511,7 +1594,7 @@ export class SyncService {
 			window.clearTimeout(this.syncQueueTimer);
 		}
 
-		void this.store.close();
+		void this.localStore.close();
 		void this.conflictStore.close();
 	}
 
@@ -1643,7 +1726,9 @@ export class SyncService {
 				collectSyncableFilesInFolder(syncFolderState.folder)
 					.map((file) => createFileRecordId(file.path))
 			),
-			listObsidianConfigFilePaths(this.app)
+			listObsidianConfigFilePaths(this.app).then((paths) => paths.filter(
+				(path) => isSyncedObsidianConfigurationFilePath(this.app, path)
+			))
 		]);
 
 		return [
@@ -1658,8 +1743,11 @@ export class SyncService {
 	}
 
 	private isPathInsideCurrentSyncScope(path: string) {
-		return isObsidianConfigFilePath(this.app, path)
-			|| isPathInsideSyncFolder(path, this.getCurrentSyncFolder());
+		if (isObsidianConfigFilePath(this.app, path)) {
+			return isSyncedObsidianConfigurationFilePath(this.app, path);
+		}
+
+		return isPathInsideSyncFolder(path, this.getCurrentSyncFolder());
 	}
 
 	private async createLocalRecord(path: string) {
@@ -1728,7 +1816,7 @@ export class SyncService {
 			hasAttachments: typeof record._attachments === "object"
 		});
 
-		return this.store.saveFileRecordIfChanged(record);
+		return this.localStore.saveFileRecordIfChanged(record);
 	}
 }
 

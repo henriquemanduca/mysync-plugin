@@ -34,7 +34,7 @@ function configRecord(path: string): VaultFileRecord {
 	};
 }
 
-function createFixture() {
+function createFixture(configDir = ".obsidian") {
 	const root = new TFolder("/");
 	const adapter = {
 		list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
@@ -44,7 +44,7 @@ function createFixture() {
 	};
 	const vault = {
 		adapter,
-		configDir: ".obsidian",
+		configDir,
 		getAbstractFileByPath: vi.fn().mockReturnValue(null),
 		getRoot: vi.fn().mockReturnValue(root)
 	};
@@ -62,10 +62,14 @@ function createFixture() {
 		markLocalSyncBaseline: vi.fn().mockResolvedValue(undefined),
 		markRemoteBaseline: vi.fn().mockResolvedValue(undefined),
 		pullFromCouchDb: vi.fn().mockResolvedValue({ docsRead: 0 }),
+		resolveFileRecordAsDeleted: vi.fn().mockResolvedValue(undefined),
 		saveFileRecordIfChanged: vi.fn().mockResolvedValue(true)
 	};
 	const conflictStore = {
-		listActiveConflicts: vi.fn().mockResolvedValue([])
+		ensureDatabaseExists: vi.fn().mockResolvedValue(undefined),
+		listActiveConflicts: vi.fn().mockResolvedValue([]),
+		updateConflict: vi.fn().mockResolvedValue(undefined),
+		upsertConflict: vi.fn().mockResolvedValue(undefined)
 	};
 	const settings: MySyncSettings = {
 		localVaultId: "local",
@@ -114,11 +118,16 @@ describe("SyncService configuration synchronization", () => {
 		Logger.setLevel("debug");
 	});
 
-	it("backs up top-level Obsidian configuration during sync now", async () => {
+	it("backs up only selected Obsidian configuration files during sync now", async () => {
 		const fixture = createFixture();
 		const content = arrayBuffer("{\"theme\":\"moonstone\"}");
 		fixture.adapter.list.mockResolvedValue({
-			files: [".obsidian/appearance.json"],
+			files: [
+				".obsidian/app.json",
+				".obsidian/appearance.json",
+				".obsidian/hotkeys.json",
+				".obsidian/workspace.json"
+			],
 			folders: [".obsidian/plugins"]
 		});
 		fixture.adapter.stat.mockResolvedValue({
@@ -131,20 +140,25 @@ describe("SyncService configuration synchronization", () => {
 
 		await fixture.service.syncNow();
 
-		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledOnce();
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledTimes(3);
 		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(
-			expect.objectContaining({
-				_id: "vault-file:.obsidian/appearance.json",
-				source: "obsidian-config",
-				path: ".obsidian/appearance.json"
-			})
+			expect.objectContaining({ path: ".obsidian/app.json" })
+		);
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(
+			expect.objectContaining({ path: ".obsidian/hotkeys.json" })
+		);
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(
+			expect.objectContaining({ path: ".obsidian/workspace.json" })
+		);
+		expect(fixture.store.saveFileRecordIfChanged).not.toHaveBeenCalledWith(
+			expect.objectContaining({ path: ".obsidian/appearance.json" })
 		);
 		expect(fixture.store.markLocalSyncBaseline).toHaveBeenCalledWith("/");
 		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("syncNow");
 		expect(fixture.statuses.at(-1)).toEqual({
 			state: "done",
-			total: 1,
-			saved: 1,
+			total: 3,
+			saved: 3,
 			skipped: 0
 		});
 	});
@@ -245,6 +259,90 @@ describe("SyncService configuration synchronization", () => {
 		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("pullFromCouchDb");
 		expect(Notice.instances.at(-1)?.message)
 			.toContain("Reload Obsidian to apply configuration changes.");
+	});
+
+	it("cleans up a pulled configuration file outside the allowlist without restoring or conflicting", async () => {
+		const fixture = createFixture(".configuration");
+		const remoteRecord = configRecord(".configuration/appearance.json");
+		fixture.settings.couchDbUrl = "https://couchdb.example.com";
+		fixture.adapter.list.mockResolvedValue({
+			files: [remoteRecord.path],
+			folders: []
+		});
+		fixture.store.listFileRecords
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([remoteRecord]);
+		fixture.store.listAllFileRecordIds
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([remoteRecord._id]);
+		fixture.store.listFileRevisionStates
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([{
+				recordId: remoteRecord._id,
+				winningRevision: "2-remote",
+				leaves: [{
+					revision: "1-local-delete",
+					deleted: true
+				}, {
+					revision: "2-remote",
+					deleted: false,
+					record: {
+						...remoteRecord,
+						_rev: "2-remote"
+					}
+				}]
+			}]);
+		fixture.store.pullFromCouchDb.mockResolvedValue({ docsRead: 1 });
+
+		await fixture.service.pullFromCouchDb();
+
+		expect(fixture.store.listFileRevisionStates).toHaveBeenNthCalledWith(1, []);
+		expect(fixture.store.resolveFileRecordAsDeleted)
+			.toHaveBeenCalledWith(remoteRecord._id);
+		expect(fixture.adapter.writeBinary).not.toHaveBeenCalled();
+		expect(fixture.conflictStore.upsertConflict).not.toHaveBeenCalled();
+		expect(fixture.statuses.at(-1)).toEqual({
+			state: "pulled",
+			docsRead: 1,
+			restored: 0,
+			deleted: 0,
+			skipped: 1,
+			conflicts: 0
+		});
+	});
+
+	it("resolves an existing conflict for configuration outside the allowlist during initialization", async () => {
+		const fixture = createFixture();
+		const conflict = {
+			_id: "mysync-conflict:vault-file:.obsidian/appearance.json",
+			recordId: "vault-file:.obsidian/appearance.json",
+			path: ".obsidian/appearance.json",
+			kind: "local-delete-remote-edit" as const,
+			status: "pending" as const,
+			detectedAt: "2026-01-01T00:00:00.000Z",
+			updatedAt: "2026-01-01T00:00:00.000Z",
+			observedLeafRevisions: ["1-local", "1-remote"],
+			localVariant: { exists: false },
+			remoteVariants: []
+		};
+		fixture.conflictStore.listActiveConflicts.mockResolvedValue([conflict]);
+
+		await fixture.service.initialize();
+
+		expect(fixture.store.resolveFileRecordAsDeleted)
+			.toHaveBeenCalledWith(conflict.recordId);
+		expect(fixture.conflictStore.updateConflict)
+			.toHaveBeenCalledWith(conflict._id, expect.any(Function));
+		const updateConflict = fixture.conflictStore.updateConflict.mock.calls[0]?.[1];
+		expect(updateConflict?.(conflict)).toMatchObject({
+			status: "resolved",
+			resolution: {
+				strategy: "delete",
+				resolvedDocumentIds: [conflict.recordId]
+			}
+		});
+		await expect(fixture.service.listActiveConflicts()).resolves.toEqual([]);
 	});
 
 	it("does not restore a configuration record into a nested plugin directory", async () => {

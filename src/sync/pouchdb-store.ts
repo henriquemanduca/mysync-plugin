@@ -139,10 +139,10 @@ export class PouchDbFileStore {
 	}
 
 	async deleteFileRecordById(recordId: string) {
-		return this.runWithLocalDb("deleteFileRecordById", async (fileDb) => {
+		return this.runWithLocalDb("deleteFileRecordById", async (localDB) => {
 			try {
-				const existing = await fileDb.get(recordId);
-				await fileDb.remove(existing);
+				const existing = await localDB.get(recordId);
+				await localDB.remove(existing);
 			} catch (error) {
 				if (!isPouchNotFound(error)) {
 					logger.error("Failed to remove deleted file record", error, { recordId });
@@ -387,8 +387,7 @@ export class PouchDbFileStore {
 	}
 
 	async listFileRecords() {
-		logger.debug("List file records requested");
-
+		logger.debug("Local file list records requested");
 		return this.runWithLocalDb("listFileRecords", async (fileDb) => {
 			return this.listFileRecordsFromDb(fileDb);
 		});
@@ -495,21 +494,6 @@ export class PouchDbFileStore {
 				}
 			}
 		});
-	}
-
-	async listSyncableFileRecordIds() {
-		logger.debug("List syncable file record ids requested");
-		const records = await this.listFileRecords();
-		const recordIds = records
-			.map((record) => record._id)
-			.filter(isSyncableFileRecordId);
-
-		logger.debug("List syncable file record ids completed", {
-			totalRecords: records.length,
-			syncableRecords: recordIds.length
-		});
-
-		return recordIds;
 	}
 
 	private async listSyncableFileRecordIdsFromDb(fileDb: PouchDB<VaultFileRecord>) {
@@ -655,7 +639,7 @@ export class PouchDbFileStore {
 
 	private runWithLocalDb<T>(
 		operationName: string,
-		operation: (fileDb: PouchDB<VaultFileRecord>) => Promise<T>
+		operation: (localDB: PouchDB<VaultFileRecord>) => Promise<T>
 	) {
 		const queuedOperation = this.operationQueue.then(async () => {
 			this.ensureLocalDbOpen();

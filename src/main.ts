@@ -46,6 +46,7 @@ export default class MySyncPlugin extends Plugin {
 
 	async onload() {
 		Logger.configureFileLogging(this.app.vault.adapter, this.getPluginDir());
+
 		await this.loadSettings();
 		await this.ensureAndroidNoMediaFile();
 
