@@ -721,7 +721,6 @@ export class SyncService {
 				for (const path of pendingPaths) {
 					this.pendingSyncPaths.add(path);
 				}
-
 				throw error;
 			}
 
@@ -737,14 +736,15 @@ export class SyncService {
 			);
 
 			logger.info("Pending files push completed", {
-				database: connection.database,
 				preparedPaths: pendingPaths.length,
 				docsWritten: pushResult.docsWritten
 			});
+
 			this.onStatusChange({
 				state: "pushed",
 				docsWritten: pushResult.docsWritten
 			});
+
 			await this.onOperationCompleted("pushToCouchDb");
 			new Notice(`Pushed ${pushResult.docsWritten} pending document(s).`);
 		} catch (error) {
@@ -1800,9 +1800,7 @@ export class SyncService {
 
 	private async syncFileIfChanged(file: TFile) {
 		if (!isSyncableVaultFile(file)) {
-			logger.debug("Skipped blacklisted local file", {
-				path: file.path
-			});
+			logger.debug("Skipped blacklisted local file", { path: file.path });
 			return false;
 		}
 

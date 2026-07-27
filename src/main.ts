@@ -416,12 +416,12 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 
 			return {
 				text: `preparing ${percent}%`,
-				title: `Saved ${status.saved}, skipped ${status.skipped}`
+				title: `Saved ${status.saved}`
 			};
 		}
 
 		case "done": {
-			const text = `Saved ${status.saved}, skipped ${status.skipped}`;
+			const text = `Saved ${status.saved}`;
 
 			return {
 				text,

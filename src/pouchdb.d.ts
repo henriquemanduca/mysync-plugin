@@ -28,6 +28,11 @@ declare module "pouchdb" {
 		interface ReplicationChange {
 			docs_written?: number;
 			docs_read?: number;
+			docs?: Array<ExistingDocument & {
+				_deleted?: boolean;
+				fileName?: string;
+				path?: string;
+			}>;
 		}
 
 		interface ReplicationResult {

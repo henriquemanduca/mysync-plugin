@@ -87,30 +87,20 @@ export class PouchDbFileStore {
 	}
 
 	async saveFileRecordIfChanged(record: VaultFileRecord) {
-		return this.runWithLocalDb("saveFileRecordIfChanged", async (fileDb) => {
+		return this.runWithLocalDb("saveFileRecordIfChanged", async (locaDB) => {
 			try {
-				const existing = await fileDb.get(record._id);
+				const existing = await locaDB.get(record._id);
 
 				if (existing.contentHash === record.contentHash) {
-					logger.debug("File record unchanged", {
-						recordId: record._id,
-						path: record.path,
-						fileType: record.fileType,
-						size: record.size
-					});
 					return false;
 				}
 
-				await fileDb.put({
+				await locaDB.put({
 					...(existing.conflictResolution
 						? { conflictResolution: existing.conflictResolution }
 						: {}),
 					...record,
 					_rev: existing._rev
-				});
-				logger.debug("Changed file record updated", {
-					recordId: record._id,
-					path: record.path
 				});
 				return true;
 			} catch (error) {
@@ -121,7 +111,7 @@ export class PouchDbFileStore {
 						fileType: record.fileType,
 						size: record.size
 					});
-					await fileDb.put(record);
+					await locaDB.put(record);
 					logger.debug("New file record created", {
 						recordId: record._id,
 						path: record.path
@@ -162,22 +152,19 @@ export class PouchDbFileStore {
 			hasPassword: connection.password.length > 0
 		});
 
-		return this.runWithLocalDb("pushToCouchDb", async (fileDb) => {
+		return this.runWithLocalDb("pushToCouchDb", async (localDB) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
 
 			if (pushOptions.pendingChangesOnly) {
-				logger.info("Using PouchDB checkpoint for pending changes push", {
-					database: connection.database
-				});
+				logger.info("Using PouchDB checkpoint for pending changes push");
+
 			} else if (pushOptions.docIds) {
 				options.doc_ids = Array.from(new Set(pushOptions.docIds)).filter(isSyncableFileRecordId);
-			} else {
-				logger.info("Listing syncable file records before push", {
-					database: connection.database
-				});
 
-				options.doc_ids = await this.listSyncableFileRecordIdsFromDb(fileDb);
+			} else {
+				logger.info("Listing syncable file records before push");
+				options.doc_ids = await this.listSyncableFileRecordIdsFromDb(localDB);
 			}
 
 			logger.info("Syncable file records listed for push", {
@@ -189,50 +176,58 @@ export class PouchDbFileStore {
 
 			return new Promise<RemotePushResult>((resolve, reject) => {
 				logger.info("Starting PouchDB push replication", {
-					database: connection.database,
 					docIdsCount: options.doc_ids?.length ?? 0
 				});
 
-				fileDb.replicate
+				localDB.replicate
 					.to(remoteUrl, options)
-					.on("active", () => {
-						logger.info("PouchDB push replication active", {
-							database: connection.database,
-							docsWritten
-						});
-					})
-					.on("paused", () => {
-						logger.info("PouchDB push replication paused", {
-							database: connection.database,
-							docsWritten
-						});
-					})
+					// .on("active", () => {
+					// 	logger.info("PouchDB push replication active", { docsWritten });
+					// })
+					// .on("paused", () => {
+					// 	logger.info("PouchDB push replication paused", { docsWritten });
+					// })
 					.on("change", (change) => {
-						docsWritten += change.docs_written ?? 0;
+						// docsWritten += change.docs_written ?? 0;
+						const changedDocs = change.docs ?? [];
+
+						if (typeof change.docs_written === "number") {
+							docsWritten = change.docs_written;
+						} else {
+							docsWritten += changedDocs.length;
+						}
+
+						for (const document of changedDocs) {
+							const path = document.path ?? getPathFromFileRecordId(document._id);
+							const fileName = document.fileName
+								?? path?.slice(path.lastIndexOf("/") + 1)
+								?? document._id;
+
+							logger.debug("PouchDB file revision pushed", {
+								fileName,
+								path,
+								revision: document._rev,
+								deleted: document._deleted === true
+							});
+						}
+
 						logger.info("PouchDB push replication changed", {
-							database: connection.database,
-							changeDocsWritten: change.docs_written ?? 0,
+							batchDocsWritten: change.docs_written ?? 0,
 							docsWritten
 						});
+
 						onProgress(docsWritten);
 					})
 					.on("denied", (error) => {
-						logger.error("PouchDB push replication denied", error, {
-							database: connection.database,
-							docsWritten
-						});
+						logger.error("PouchDB push replication denied", error, { docsWritten });
 						reject(toError(error));
 					})
 					.on("error", (error) => {
-						logger.error("PouchDB push replication failed", error, {
-							database: connection.database,
-							docsWritten
-						});
+						logger.error("PouchDB push replication failed", error, { docsWritten });
 						reject(toError(error));
 					})
 					.on("complete", (result) => {
 						logger.info("PouchDB push replication completed", {
-							database: connection.database,
 							resultDocsWritten: result.docs_written,
 							docsWritten
 						});
@@ -254,25 +249,57 @@ export class PouchDbFileStore {
 	}
 
 	async pullFromCouchDb(connection: CouchDbConnection, onProgress: (docsRead: number) => void) {
-		return this.runWithLocalDb("pullFromCouchDb", async (fileDb) => {
+		return this.runWithLocalDb("pullFromCouchDb", async (localDB) => {
 			const remoteUrl = createRemoteDatabaseUrl(connection.url, connection.database);
 			const options = createRemoteOptions(connection);
 			let docsRead = 0;
 
 			return new Promise<RemotePullResult>((resolve, reject) => {
-				fileDb.replicate
+				localDB.replicate
 					.from(remoteUrl, options)
 					.on("change", (change) => {
-						docsRead += change.docs_read ?? 0;
+						const changedDocs = change.docs ?? [];
+
+						if (typeof change.docs_read === "number") {
+							docsRead = change.docs_read;
+						} else {
+							docsRead += changedDocs.length;
+						}
+
+						for (const document of changedDocs) {
+							const path = document.path ?? getPathFromFileRecordId(document._id);
+							const fileName = document.fileName
+								?? path?.slice(path.lastIndexOf("/") + 1)
+								?? document._id;
+
+							logger.debug("PouchDB file revision pulled", {
+								fileName,
+								path,
+								revision: document._rev,
+								deleted: document._deleted === true
+							});
+						}
+
+						logger.info("PouchDB pull replication changed", {
+							batchDocsRead: change.docs_read ?? 0,
+							docsRead
+						});
+
 						onProgress(docsRead);
 					})
 					.on("denied", (error) => {
+						logger.error("PouchDB pull replication denied", error, { docsRead });
 						reject(toError(error));
 					})
 					.on("error", (error) => {
+						logger.error("PouchDB pull replication failed", error, { docsRead });
 						reject(toError(error));
 					})
 					.on("complete", (result) => {
+						logger.info("PouchDB pull replication completed", {
+							resultDocsRead: result.docs_written,
+							docsRead
+						});
 						resolve({
 							docsRead: result.docs_read ?? docsRead
 						});
@@ -298,11 +325,11 @@ export class PouchDbFileStore {
 	}
 
 	async hasRemoteBaseline(connection: CouchDbConnection) {
-		return this.runWithLocalDb("hasRemoteBaseline", async (fileDb) => {
+		return this.runWithLocalDb("hasRemoteBaseline", async (localDB) => {
 			const baselineId = await createRemoteBaselineLocalDocumentId(connection);
 
 			try {
-				await getLocalDocumentStore(fileDb).get(baselineId);
+				await getLocalDocumentStore(localDB).get(baselineId);
 				return true;
 			} catch (error) {
 				if (isPouchNotFound(error)) {
@@ -691,8 +718,8 @@ async function createSha256Hex(value: string) {
 	return Array.from(new Uint8Array(hashBuffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function getLocalDocumentStore(fileDb: PouchDB<VaultFileRecord>) {
-	return fileDb as unknown as LocalDocumentStore;
+function getLocalDocumentStore(localDB: PouchDB<VaultFileRecord>) {
+	return localDB as unknown as LocalDocumentStore;
 }
 
 function createRemoteOptions(connection: CouchDbConnection): PouchDB.ReplicationOptions {
