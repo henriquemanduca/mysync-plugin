@@ -1,0 +1,26 @@
+services:
+  couchdb:
+    image: couchdb:3.5
+    container_name: mysync-couchdb
+    # Running as the image's CouchDB user keeps the entrypoint from trying to
+    # change ownership of the read-only local.ini bind mount.
+    user: couchdb
+    restart: unless-stopped
+    ports:
+      - "${COUCHDB_PORT:-5984}:5984"
+    environment:
+      COUCHDB_USER: "${COUCH_ADMIN_USER:-admin}"
+      COUCHDB_PASSWORD: "${COUCH_ADMIN_PASS:-admin_password}"
+    volumes:
+      - couchdb_data:/opt/couchdb/data
+      - ./local.ini:/opt/couchdb/etc/local.d/10-mysync.ini:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/_up"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  couchdb_data:
+    name: mysync-couchdb-data

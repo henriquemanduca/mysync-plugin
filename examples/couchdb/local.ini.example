@@ -1,0 +1,18 @@
+; CouchDB local configuration for MySync example
+; Mounted as /opt/couchdb/etc/local.d/10-mysync.ini in the container
+
+[couchdb]
+single_node = true
+
+[chttpd]
+bind_address = 0.0.0.0
+require_valid_user = false
+
+[httpd]
+enable_cors = true
+
+[cors]
+origins = http://localhost:*
+credentials = true
+methods = GET, PUT, POST, HEAD, DELETE
+headers = accept, authorization, content-type, origin, referer, x-csrf-token

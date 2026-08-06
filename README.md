@@ -164,6 +164,11 @@ The script uses an admin account to create a plugin user and assign a role to
 the configured database. Review the script before running it against a real
 server.
 
+For local development and testing, an example Docker Compose setup is available
+at [`examples/couchdb/`](examples/couchdb/). It runs a single-node CouchDB
+container with a persistent volume and health check. See
+[`examples/couchdb/README.md`](examples/couchdb/README.md) for instructions.
+
 ## Development
 
 Clone this repository into your vault plugin folder:

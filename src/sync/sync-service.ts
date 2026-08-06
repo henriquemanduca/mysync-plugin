@@ -1320,8 +1320,6 @@ export class SyncService {
 	private async syncObsidianConfigurationFiles(
 		initialResult: LocalSyncResult = { total: 0, saved: 0, skipped: 0 }
 	): Promise<LocalSyncResult> {
-		logger.debug("Executing sync for configuration");
-
 		const paths = (await listObsidianConfigFilePaths(this.app))
 			.filter((path) => isSyncedObsidianConfigurationFilePath(this.app, path));
 
