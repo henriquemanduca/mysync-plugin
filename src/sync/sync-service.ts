@@ -61,6 +61,12 @@ interface PullClassification {
 	conflictedRecordIds: Set<string>;
 }
 
+export interface EmptyFolderCleanupResult {
+	total: number;
+	removed: number;
+	skipped: number;
+}
+
 export type SyncStatus =
 	| { state: "idle" }
 	| { state: "queued"; pending: number }
@@ -72,6 +78,8 @@ export type SyncStatus =
 	| { state: "deleting"; current: number; total: number; deleted: number; skipped: number; conflicts: number }
 	| { state: "restoring"; current: number; total: number; restored: number; skipped: number; conflicts: number }
 	| { state: "pulled"; docsRead: number; restored: number; deleted: number; skipped: number; conflicts: number }
+	| { state: "cleaning-empty-folders"; current: number; total: number; removed: number; skipped: number }
+	| { state: "empty-folders-cleaned"; removed: number; skipped: number }
 	| { state: "resetting-local-databases" }
 	| { state: "local-databases-reset" }
 	| { state: "testing" }
@@ -1171,7 +1179,13 @@ export class SyncService {
 			return "conflict";
 		}
 
+		const parentFolder = existingVaultFile instanceof TFile ? existingVaultFile.parent : null;
 		await this.deleteLocalFile(path);
+
+		if (!configFile) {
+			await this.removeEmptyParentFolders(parentFolder);
+		}
+
 		await this.localStore.deleteFileRecordById(recordId);
 		return "deleted";
 	}
@@ -1587,6 +1601,67 @@ export class SyncService {
 		}
 	}
 
+	getEmptyVaultFolderCount() {
+		return this.collectEmptyVaultFolders().length;
+	}
+
+	async cleanEmptyVaultFolders(): Promise<EmptyFolderCleanupResult | null> {
+		if (this.isRunning()) {
+			return null;
+		}
+
+		this.syncInProgress = true;
+		const notice = new Notice("Cleaning empty folders.", 0);
+		let removed = 0;
+		let skipped = 0;
+		let folders: TFolder[] = [];
+
+		try {
+			folders = this.collectEmptyVaultFolders();
+
+			for (const [index, folder] of folders.entries()) {
+				if (await this.removeEmptyFolder(folder)) {
+					removed += 1;
+				} else {
+					skipped += 1;
+				}
+
+				this.onStatusChange({
+					state: "cleaning-empty-folders",
+					current: index + 1,
+					total: folders.length,
+					removed,
+					skipped
+				});
+			}
+
+			const result = { total: folders.length, removed, skipped };
+			this.onStatusChange({
+				state: "empty-folders-cleaned",
+				removed,
+				skipped
+			});
+			new Notice(`Removed ${removed} empty folder(s), skipped ${skipped}.`);
+			logger.info("Empty vault folder cleanup completed", result);
+			return result;
+		} catch (error) {
+			logger.error("Empty vault folder cleanup failed", error);
+			this.onStatusChange({
+				state: "error",
+				message: "Empty vault folder cleanup failed"
+			});
+			new Notice(getErrorMessage(
+				error,
+				"Empty vault folder cleanup failed. Check the console for details."
+			));
+			return null;
+		} finally {
+			notice.hide();
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+		}
+	}
+
 	close() {
 		if (this.syncQueueTimer !== null) {
 			window.clearTimeout(this.syncQueueTimer);
@@ -1793,6 +1868,87 @@ export class SyncService {
 			await this.app.fileManager.trashFile(existing);
 		} else if (existing) {
 			throw new Error(`Cannot delete ${path}: the path is not a file.`);
+		}
+	}
+
+	private async removeEmptyParentFolders(folder: TFolder | null) {
+		const syncFolderState = getSyncFolderState(this.app, this.getCurrentSyncFolder());
+
+		if (!syncFolderState.valid) {
+			return;
+		}
+
+		const vaultRoot = this.app.vault.getRoot();
+		let currentFolder = folder;
+
+		while (
+			currentFolder
+			&& currentFolder !== vaultRoot
+			&& currentFolder.path !== syncFolderState.folder.path
+		) {
+			if (currentFolder.children.length > 0) {
+				return;
+			}
+
+			const parentFolder = currentFolder.parent;
+
+			if (!(await this.removeEmptyFolder(currentFolder))) {
+				return;
+			}
+
+			currentFolder = parentFolder;
+		}
+	}
+
+	private collectEmptyVaultFolders() {
+		const folders: TFolder[] = [];
+		const configFolder = this.app.vault.configDir.trim().replace(/^\/+|\/+$/g, "");
+
+		const collect = (folder: TFolder): boolean => {
+			if (
+				folder.path === configFolder
+				|| (configFolder.length > 0 && folder.path.startsWith(`${configFolder}/`))
+			) {
+				return false;
+			}
+
+			let canRemoveFolder = true;
+
+			for (const child of folder.children) {
+				if (child instanceof TFolder) {
+					canRemoveFolder = collect(child) && canRemoveFolder;
+				} else {
+					canRemoveFolder = false;
+				}
+			}
+
+			if (folder === this.app.vault.getRoot()) {
+				return false;
+			}
+
+			if (canRemoveFolder) {
+				folders.push(folder);
+				return true;
+			}
+
+			return false;
+		};
+
+		collect(this.app.vault.getRoot());
+		return folders;
+	}
+
+	private async removeEmptyFolder(folder: TFolder) {
+		if (folder.children.length > 0) {
+			return false;
+		}
+
+		try {
+			await this.app.fileManager.trashFile(folder);
+			return true;
+		} catch (error) {
+			logger.warn("Failed to remove empty folder", error, { path: folder.path });
+			return false;
 		}
 	}
 

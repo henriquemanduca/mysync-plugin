@@ -6,7 +6,7 @@ import type { PouchDbFileStore } from "../../src/sync/pouchdb-store";
 import { SyncService, type SyncStatus } from "../../src/sync/sync-service";
 import type { VaultFileRecord } from "../../src/sync/types";
 import { Logger } from "../../src/utils/logger";
-import { Notice, TFolder } from "../mocks/obsidian";
+import { Notice, TAbstractFile, TFile, TFolder } from "../mocks/obsidian";
 
 function arrayBuffer(value: string) {
 	return new TextEncoder().encode(value).buffer;
@@ -40,18 +40,22 @@ function createFixture(configDir = ".obsidian") {
 		list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
 		readBinary: vi.fn(),
 		stat: vi.fn(),
+		trashLocal: vi.fn(),
+		trashSystem: vi.fn().mockResolvedValue(true),
 		writeBinary: vi.fn().mockResolvedValue(undefined)
 	};
 	const vault = {
 		adapter,
+		cachedRead: vi.fn(),
 		configDir,
 		getAbstractFileByPath: vi.fn().mockReturnValue(null),
 		getRoot: vi.fn().mockReturnValue(root)
 	};
+	const fileManager = {
+		trashFile: vi.fn()
+	};
 	const app = {
-		fileManager: {
-			trashFile: vi.fn()
-		},
+		fileManager,
 		vault
 	} as unknown as App;
 	const store = {
@@ -101,12 +105,72 @@ function createFixture(configDir = ".obsidian") {
 	return {
 		adapter,
 		conflictStore,
+		fileManager,
 		onOperationCompleted,
+		root,
 		service,
 		settings,
 		statuses,
-		store
+		store,
+		vault
 	};
+}
+
+function markdownRecord(path: string, content = "hello"): VaultFileRecord {
+	return {
+		_id: `vault-file:${path}`,
+		type: "vault-file",
+		fileType: "markdown",
+		fileName: path.slice(path.lastIndexOf("/") + 1),
+		path,
+		size: content.length,
+		contentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		content,
+		lastChanged: 100,
+		lastChangedIso: new Date(100).toISOString()
+	};
+}
+
+function configureVaultTree(
+	fixture: ReturnType<typeof createFixture>,
+	root: TFolder
+) {
+	const filesByPath = new Map<string, TAbstractFile>();
+	const addFolder = (folder: TFolder) => {
+		filesByPath.set(folder.path, folder);
+
+		for (const child of folder.children) {
+			filesByPath.set(child.path, child);
+
+			if (child instanceof TFolder) {
+				addFolder(child);
+			}
+		}
+	};
+
+	addFolder(root);
+	fixture.vault.getRoot.mockReturnValue(root);
+	fixture.vault.getAbstractFileByPath.mockImplementation((path: string) => filesByPath.get(path) ?? null);
+	fixture.fileManager.trashFile.mockImplementation(async (file: TAbstractFile) => {
+		file.parent?.children.splice(file.parent.children.indexOf(file), 1);
+		filesByPath.delete(file.path);
+	});
+}
+
+function deleteRemoteFile(
+	fixture: ReturnType<typeof createFixture>,
+	record: VaultFileRecord,
+	localRecord: VaultFileRecord | null = record
+) {
+	return (fixture.service as unknown as {
+		deleteRemoteDeletedFile(
+			recordId: string,
+			localRecordsById: Map<string, VaultFileRecord>
+		): Promise<string>;
+	}).deleteRemoteDeletedFile(
+		record._id,
+		localRecord ? new Map([[record._id, localRecord]]) : new Map()
+	);
 }
 
 describe("SyncService configuration synchronization", () => {
@@ -378,5 +442,165 @@ describe("SyncService configuration synchronization", () => {
 		await fixture.service.pullFromCouchDb();
 
 		expect(fixture.adapter.writeBinary).not.toHaveBeenCalled();
+	});
+});
+
+describe("SyncService remote deletion cleanup", () => {
+	beforeEach(() => {
+		Logger.setLevel("off");
+	});
+
+	afterEach(() => {
+		Logger.setLevel("debug");
+	});
+
+	it("removes empty ancestors without removing the custom sync folder", async () => {
+		const fixture = createFixture();
+		const file = new TFile("Sync/Topic/note.md", 5);
+		const topic = new TFolder("Sync/Topic", [file]);
+		const syncFolder = new TFolder("Sync", [topic]);
+		const root = new TFolder("/", [syncFolder]);
+		const record = markdownRecord(file.path);
+		fixture.settings.syncFolderMode = "custom";
+		fixture.settings.customSyncFolder = "Sync";
+		fixture.vault.cachedRead.mockResolvedValue("hello");
+		configureVaultTree(fixture, root);
+
+		await expect(deleteRemoteFile(fixture, record)).resolves.toBe("deleted");
+
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(1, file);
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(2, topic);
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(2);
+		expect(syncFolder.children).toEqual([]);
+		expect(root.children).toEqual([syncFolder]);
+	});
+
+	it("keeps an ancestor that still has content", async () => {
+		const fixture = createFixture();
+		const file = new TFile("Topic/note.md", 5);
+		const retainedFile = new TFile("Topic/keep.md", 4);
+		const topic = new TFolder("Topic", [file, retainedFile]);
+		const root = new TFolder("/", [topic]);
+		const record = markdownRecord(file.path);
+		fixture.vault.cachedRead.mockResolvedValue("hello");
+		configureVaultTree(fixture, root);
+
+		await expect(deleteRemoteFile(fixture, record)).resolves.toBe("deleted");
+
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(1);
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledWith(file);
+		expect(root.children).toEqual([topic]);
+		expect(topic.children).toEqual([retainedFile]);
+	});
+
+	it("never removes the vault root while pruning an empty chain", async () => {
+		const fixture = createFixture();
+		const file = new TFile("Area/Topic/note.md", 5);
+		const topic = new TFolder("Area/Topic", [file]);
+		const area = new TFolder("Area", [topic]);
+		const root = new TFolder("/", [area]);
+		const record = markdownRecord(file.path);
+		fixture.vault.cachedRead.mockResolvedValue("hello");
+		configureVaultTree(fixture, root);
+
+		await expect(deleteRemoteFile(fixture, record)).resolves.toBe("deleted");
+
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(1, file);
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(2, topic);
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(3, area);
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(3);
+		expect(root.children).toEqual([]);
+	});
+
+	it("does not prune the Obsidian configuration folder", async () => {
+		const fixture = createFixture();
+		const record = configRecord(".obsidian/app.json");
+		fixture.adapter.stat.mockResolvedValue({ type: "file" });
+
+		await expect(deleteRemoteFile(fixture, record, null)).resolves.toBe("deleted");
+
+		expect(fixture.adapter.trashSystem).toHaveBeenCalledWith(record.path);
+		expect(fixture.fileManager.trashFile).not.toHaveBeenCalled();
+	});
+});
+
+describe("SyncService empty vault folder cleanup", () => {
+	beforeEach(() => {
+		Logger.setLevel("off");
+	});
+
+	afterEach(() => {
+		Logger.setLevel("debug");
+	});
+
+	it("removes empty folder trees throughout the vault while preserving configuration folders", async () => {
+		const fixture = createFixture();
+		const topic = new TFolder("Area/Topic");
+		const area = new TFolder("Area", [topic]);
+		const retainedFile = new TFile("Notes/keep.md", 4);
+		const notes = new TFolder("Notes", [retainedFile]);
+		const pluginFolder = new TFolder(".obsidian/plugins");
+		const configFolder = new TFolder(".obsidian", [pluginFolder]);
+		const root = new TFolder("/", [area, notes, configFolder]);
+		configureVaultTree(fixture, root);
+
+		expect(fixture.service.getEmptyVaultFolderCount()).toBe(2);
+		await expect(fixture.service.cleanEmptyVaultFolders()).resolves.toEqual({
+			total: 2,
+			removed: 2,
+			skipped: 0
+		});
+
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(1, topic);
+		expect(fixture.fileManager.trashFile).toHaveBeenNthCalledWith(2, area);
+		expect(root.children).toEqual([notes, configFolder]);
+		expect(configFolder.children).toEqual([pluginFolder]);
+		expect(fixture.statuses.at(-1)).toEqual({
+			state: "empty-folders-cleaned",
+			removed: 2,
+			skipped: 0
+		});
+	});
+
+	it("skips a folder that gains content after the cleanup scan", async () => {
+		const fixture = createFixture();
+		const topic = new TFolder("Area/Topic");
+		const area = new TFolder("Area", [topic]);
+		const root = new TFolder("/", [area]);
+		configureVaultTree(fixture, root);
+		fixture.fileManager.trashFile.mockImplementation(async (folder: TAbstractFile) => {
+			folder.parent?.children.splice(folder.parent.children.indexOf(folder), 1);
+
+			if (folder === topic) {
+				area.children.push(new TFile("Area/created-during-cleanup.md", 1));
+			}
+		});
+
+		await expect(fixture.service.cleanEmptyVaultFolders()).resolves.toEqual({
+			total: 2,
+			removed: 1,
+			skipped: 1
+		});
+
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(1);
+		expect(root.children).toEqual([area]);
+	});
+
+	it("continues when moving an empty folder to trash fails", async () => {
+		const fixture = createFixture();
+		const topic = new TFolder("Area/Topic");
+		const area = new TFolder("Area", [topic]);
+		const root = new TFolder("/", [area]);
+		configureVaultTree(fixture, root);
+		fixture.fileManager.trashFile.mockRejectedValue(new Error("Trash unavailable"));
+
+		await expect(fixture.service.cleanEmptyVaultFolders()).resolves.toEqual({
+			total: 2,
+			removed: 0,
+			skipped: 2
+		});
+
+		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(1);
+		expect(root.children).toEqual([area]);
 	});
 });
