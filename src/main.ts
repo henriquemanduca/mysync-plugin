@@ -5,6 +5,7 @@ import { PouchDbConflictStore } from "./sync/conflict-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
 import type { SyncConflict } from "./sync/types";
 import { ConflictResolutionModal } from "./conflict-resolution-modal";
+import { EmptyFolderCleanupModal } from "./empty-folder-cleanup-modal";
 import { LocalDatabaseResetModal } from "./local-database-reset-modal";
 import { formatDateTime } from "./utils/date-format";
 import { isLoggerLevel, Logger } from "./utils/logger";
@@ -42,6 +43,7 @@ export default class MySyncPlugin extends Plugin {
 	private activeConflictCount = 0;
 	private currentSyncStatus: SyncStatus = { state: "idle" };
 	private conflictModal: ConflictResolutionModal | null = null;
+	private emptyFolderCleanupModal: EmptyFolderCleanupModal | null = null;
 	private localDatabaseResetModal: LocalDatabaseResetModal | null = null;
 
 	async onload() {
@@ -109,6 +111,14 @@ export default class MySyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "clean-empty-folders",
+			name: "Clean empty folders",
+			callback: () => {
+				void this.openEmptyFolderCleanupModal();
+			}
+		});
+
+		this.addCommand({
 			id: "review-sync-conflicts",
 			name: "Resolve sync conflicts",
 			callback: () => {
@@ -157,6 +167,7 @@ export default class MySyncPlugin extends Plugin {
 	onunload() {
 		this.clearIdleStatusTimer();
 		this.conflictModal?.close();
+		this.emptyFolderCleanupModal?.close();
 		this.localDatabaseResetModal?.close();
 		this.syncService.close();
 		void Logger.flush();
@@ -215,6 +226,29 @@ export default class MySyncPlugin extends Plugin {
 			}
 		);
 		this.localDatabaseResetModal.open();
+	}
+
+	private openEmptyFolderCleanupModal() {
+		if (this.emptyFolderCleanupModal || this.syncService.isRunning()) {
+			return;
+		}
+
+		const folderCount = this.syncService.getEmptyVaultFolderCount();
+
+		if (folderCount === 0) {
+			new Notice("No empty folders found in the vault.");
+			return;
+		}
+
+		this.emptyFolderCleanupModal = new EmptyFolderCleanupModal(
+			this.app,
+			folderCount,
+			() => this.syncService.cleanEmptyVaultFolders(),
+			() => {
+				this.emptyFolderCleanupModal = null;
+			}
+		);
+		this.emptyFolderCleanupModal.open();
 	}
 
 	private async saveCompletedSyncOperation(operation: CompletedSyncOperation) {
@@ -453,6 +487,19 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 			return {
 				text: `restored ${status.restored}, deleted ${status.deleted}`,
 				title: `Read ${status.docsRead}, restored ${status.restored}, deleted ${status.deleted}, skipped ${status.skipped}, conflicts ${status.conflicts}`,
+				returnToIdle: true
+			};
+
+		case "cleaning-empty-folders":
+			return {
+				text: `cleaning ${status.current}/${status.total}`,
+				title: `Removed ${status.removed}, skipped ${status.skipped}`
+			};
+
+		case "empty-folders-cleaned":
+			return {
+				text: `removed ${status.removed} folders`,
+				title: `Removed ${status.removed} empty folder(s), skipped ${status.skipped}`,
 				returnToIdle: true
 			};
 
