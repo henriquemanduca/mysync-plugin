@@ -1,4 +1,4 @@
-import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
+import { App, Notice, TAbstractFile, TFile, TFolder, requestUrl } from "obsidian";
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
@@ -1247,10 +1247,77 @@ export class SyncService {
 		return file instanceof TFile && this.localFileMatchesRecord(file, record);
 	}
 
-	async testCouchDbConnection() {
+	async testRemoteConnection() {
 		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
+
+		if (settings.remoteBackend === "nextcloud") {
+			return this.testNextcloudConnection(settings);
+		}
+
+		return this.testCouchDbConnection(settings);
+	}
+
+	private async testNextcloudConnection(settings: MySyncSettings) {
+		const validationMessage = validateNextcloudSettings(settings, "testing");
+
+		if (validationMessage) {
+			this.onStatusChange({
+				state: "error",
+				message: validationMessage
+			});
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+		let failed = false;
+
+		try {
+			this.onStatusChange({ state: "testing" });
+
+			const rootUrl = settings.nextcloudUrl.replace(/\/+$/, "");
+			const webdavUrl = `${rootUrl}/remote.php/webdav/`;
+			
+			const token = btoa(`${settings.nextcloudUsername}:${settings.nextcloudPassword}`);
+			
+			const result = await requestUrl({
+				url: webdavUrl,
+				method: "PROPFIND",
+				headers: {
+					"Authorization": `Basic ${token}`,
+					"Depth": "0"
+				}
+			});
+
+			if (result.status >= 200 && result.status < 300) {
+				this.onStatusChange({
+					state: "tested",
+					databaseName: "Nextcloud",
+				});
+				new Notice("Connected to Nextcloud successfully");
+			} else {
+				throw new Error(`HTTP Error: ${result.status}`);
+			}
+		} catch (error) {
+			failed = true;
+			logger.error("Nextcloud connection test failed", error);
+			this.onStatusChange({
+				state: "error",
+				message: "Nextcloud connection failed"
+			});
+			new Notice(getErrorMessage(error, "Nextcloud connection failed. Check the console for details"));
+		} finally {
+			this.syncInProgress = false;
+
+			if (!failed) {
+				this.refreshQueuedStatus();
+			}
+		}
+	}
+
+	private async testCouchDbConnection(settings: MySyncSettings) {
 		const validationMessage = validateCouchDbSettings(settings, "testing");
 
 		if (validationMessage) {
@@ -2051,6 +2118,22 @@ function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing"
 
 	if (!settings.couchDbDatabase) {
 		return `Set a CouchDB database before ${operation}.`;
+	}
+
+	return null;
+}
+
+function validateNextcloudSettings(settings: MySyncSettings, operation = "pushing") {
+	if (!settings.nextcloudUrl) {
+		return `Set a Nextcloud URL before ${operation}.`;
+	}
+
+	if (!isHttpUrl(settings.nextcloudUrl)) {
+		return `Set a valid Nextcloud URL before ${operation}.`;
+	}
+
+	if (!settings.nextcloudUsername || !settings.nextcloudPassword) {
+		return `Set Nextcloud credentials before ${operation}.`;
 	}
 
 	return null;

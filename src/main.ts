@@ -1,5 +1,5 @@
 import { Notice, Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings } from "./settings";
+import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings, isRemoteSyncBackend } from "./settings";
 import { PouchDbFileStore } from "./sync/pouchdb-store";
 import { PouchDbConflictStore } from "./sync/conflict-store";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
@@ -23,6 +23,10 @@ const STRING_SETTING_KEYS = [
 	"couchDbDatabase",
 	"couchDbUsername",
 	"couchDbPassword",
+	"nextcloudUrl",
+	"nextcloudUsername",
+	"nextcloudPassword",
+	"nextcloudRemotePath",
 	"lastSyncNowAt",
 	"lastPushToCouchDbAt",
 	"lastPullFromCouchDbAt",
@@ -130,7 +134,7 @@ export default class MySyncPlugin extends Plugin {
 			id: "test-remote-connection",
 			name: "Test remote connection",
 			callback: () => {
-				void this.syncService.testCouchDbConnection();
+				void this.syncService.testRemoteConnection();
 			}
 		});
 
@@ -411,6 +415,10 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 
 	if (isSyncFolderMode(data.syncFolderMode)) {
 		settings.syncFolderMode = data.syncFolderMode;
+	}
+
+	if (typeof data.remoteBackend === "string" && isRemoteSyncBackend(data.remoteBackend)) {
+		settings.remoteBackend = data.remoteBackend;
 	}
 
 	if (typeof data.syncObsidianConfig === "boolean") {

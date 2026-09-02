@@ -6,6 +6,7 @@ import { formatDateTime } from "./utils/date-format";
 import type { LoggerLevel } from "./utils/logger";
 
 export type SyncFolderMode = "vault-root" | "custom";
+export type RemoteSyncBackend = "couchdb" | "nextcloud";
 
 export interface MySyncSettings {
 	localVaultId: string;
@@ -13,10 +14,15 @@ export interface MySyncSettings {
 	syncFolderMode: SyncFolderMode;
 	customSyncFolder: string;
 	syncObsidianConfig: boolean;
+	remoteBackend: RemoteSyncBackend;
 	couchDbUrl: string;
 	couchDbDatabase: string;
 	couchDbUsername: string;
 	couchDbPassword: string;
+	nextcloudUrl: string;
+	nextcloudUsername: string;
+	nextcloudPassword: string;
+	nextcloudRemotePath: string;
 	logLevel: LoggerLevel;
 	lastSyncNowAt: string;
 	lastPushToCouchDbAt: string;
@@ -30,10 +36,15 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	syncFolderMode: "vault-root",
 	customSyncFolder: "",
 	syncObsidianConfig: true,
+	remoteBackend: "couchdb",
 	couchDbUrl: "",
 	couchDbDatabase: "mysync",
 	couchDbUsername: "",
 	couchDbPassword: "",
+	nextcloudUrl: "",
+	nextcloudUsername: "",
+	nextcloudPassword: "",
+	nextcloudRemotePath: "/",
 	logLevel: "debug",
 	lastSyncNowAt: "",
 	lastPushToCouchDbAt: "",
@@ -43,6 +54,10 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 
 function isSyncFolderMode(value: string): value is SyncFolderMode {
 	return value === "vault-root" || value === "custom";
+}
+
+export function isRemoteSyncBackend(value: string): value is RemoteSyncBackend {
+	return value === "couchdb" || value === "nextcloud";
 }
 
 function refreshDomStateIfAvailable(settingTab: PluginSettingTab) {
@@ -194,6 +209,18 @@ export class MySyncSettingTab extends PluginSettingTab {
 				cls: "mysync-settings-section",
 				items: [
 					{
+						name: "Remote synchronization backend",
+						desc: "Choose the backend service to sync your files to.",
+						control: {
+							type: "dropdown",
+							key: "remoteBackend",
+							options: {
+								couchdb: "CouchDB",
+								nextcloud: "Nextcloud"
+							}
+						}
+					},
+					{
 						name: "CouchDB URL",
 						desc: "Base URL for the CouchDB server.",
 						control: {
@@ -235,6 +262,49 @@ export class MySyncSettingTab extends PluginSettingTab {
 									});
 							});
 						}
+					},
+					{
+						name: "Nextcloud URL",
+						desc: "Base URL for the Nextcloud server (e.g., https://cloud.example.com).",
+						control: {
+							type: "text",
+							key: "nextcloudUrl",
+							placeholder: "https://cloud.example.com"
+						}
+					},
+					{
+						name: "Nextcloud username",
+						desc: "Username for Nextcloud login.",
+						control: {
+							type: "text",
+							key: "nextcloudUsername",
+							placeholder: "username"
+						}
+					},
+					{
+						name: "Nextcloud App Password",
+						desc: "Use an App Password generated in your Nextcloud security settings, NOT your main password.",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.type = "password";
+								text
+									.setPlaceholder("App Password")
+									.setValue(this.plugin.settings.nextcloudPassword)
+									.onChange(async (value) => {
+										this.plugin.settings.nextcloudPassword = value;
+										await this.plugin.saveSettings();
+									});
+							});
+						}
+					},
+					{
+						name: "Nextcloud Remote Path",
+						desc: "Directory in Nextcloud where files will be synced (e.g., /Notes).",
+						control: {
+							type: "text",
+							key: "nextcloudRemotePath",
+							placeholder: "/Notes"
+						}
 					}
 				]
 			}
@@ -259,6 +329,16 @@ export class MySyncSettingTab extends PluginSettingTab {
 				refreshDomStateIfAvailable(this);
 				return;
 			}
+			case "remoteBackend": {
+				const remoteBackend = String(value);
+				if (!isRemoteSyncBackend(remoteBackend)) {
+					return;
+				}
+				this.plugin.settings.remoteBackend = remoteBackend;
+				await this.plugin.saveSettings();
+				refreshDomStateIfAvailable(this);
+				return;
+			}
 			case "customSyncFolder":
 				this.plugin.settings.customSyncFolder = String(value).trim();
 				break;
@@ -273,6 +353,15 @@ export class MySyncSettingTab extends PluginSettingTab {
 				break;
 			case "couchDbUsername":
 				this.plugin.settings.couchDbUsername = String(value).trim();
+				break;
+			case "nextcloudUrl":
+				this.plugin.settings.nextcloudUrl = String(value).trim().replace(/\/+$/g, "");
+				break;
+			case "nextcloudUsername":
+				this.plugin.settings.nextcloudUsername = String(value).trim();
+				break;
+			case "nextcloudRemotePath":
+				this.plugin.settings.nextcloudRemotePath = String(value).trim();
 				break;
 			case "logLevel":
 				this.plugin.updateLogLevel(value);
@@ -451,57 +540,131 @@ export class MySyncSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(remoteSectionEl)
-			.setName("CouchDB URL")
-			.setDesc("Base URL for the CouchDB server.")
-			.addText((text) =>
-				text
-					.setPlaceholder("https://couchdb.example.com")
-					.setValue(this.plugin.settings.couchDbUrl)
+			.setName("Remote synchronization backend")
+			.setDesc("Choose the backend service to sync your files to.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("couchdb", "CouchDB")
+					.addOption("nextcloud", "Nextcloud")
+					.setValue(this.plugin.settings.remoteBackend)
 					.onChange(async (value) => {
-						this.plugin.settings.couchDbUrl = value.trim().replace(/\/+$/g, "");
+						if (!isRemoteSyncBackend(value)) {
+							return;
+						}
+
+						this.plugin.settings.remoteBackend = value;
 						await this.plugin.saveSettings();
+						this.renderLegacySettings();
 					})
 			);
 
-		new Setting(remoteSectionEl)
-			.setName("CouchDB database")
-			.setDesc("Database name used for remote sync.")
-			.addText((text) =>
-				text
-					.setPlaceholder("mysync")
-					.setValue(this.plugin.settings.couchDbDatabase)
-					.onChange(async (value) => {
-						this.plugin.settings.couchDbDatabase = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+		if (this.plugin.settings.remoteBackend === "couchdb") {
+			new Setting(remoteSectionEl)
+				.setName("CouchDB URL")
+				.setDesc("Base URL for the CouchDB server.")
+				.addText((text) =>
+					text
+						.setPlaceholder("https://couchdb.example.com")
+						.setValue(this.plugin.settings.couchDbUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.couchDbUrl = value.trim().replace(/\/+$/g, "");
+							await this.plugin.saveSettings();
+						})
+				);
 
-		new Setting(remoteSectionEl)
-			.setName("CouchDB username")
-			.setDesc("Username for CouchDB basic authentication.")
-			.addText((text) =>
-				text
-					.setPlaceholder("username")
-					.setValue(this.plugin.settings.couchDbUsername)
-					.onChange(async (value) => {
-						this.plugin.settings.couchDbUsername = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
+			new Setting(remoteSectionEl)
+				.setName("CouchDB database")
+				.setDesc("Database name used for remote sync.")
+				.addText((text) =>
+					text
+						.setPlaceholder("mysync")
+						.setValue(this.plugin.settings.couchDbDatabase)
+						.onChange(async (value) => {
+							this.plugin.settings.couchDbDatabase = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
 
-		new Setting(remoteSectionEl)
-			.setName("CouchDB password")
-			.setDesc("Password for CouchDB basic authentication.")
-			.addText((text) => {
-				text.inputEl.type = "password";
-				text
-					.setPlaceholder("Password")
-					.setValue(this.plugin.settings.couchDbPassword)
-					.onChange(async (value) => {
-						this.plugin.settings.couchDbPassword = value;
-						await this.plugin.saveSettings();
-					});
-			});
+			new Setting(remoteSectionEl)
+				.setName("CouchDB username")
+				.setDesc("Username for CouchDB basic authentication.")
+				.addText((text) =>
+					text
+						.setPlaceholder("username")
+						.setValue(this.plugin.settings.couchDbUsername)
+						.onChange(async (value) => {
+							this.plugin.settings.couchDbUsername = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("CouchDB password")
+				.setDesc("Password for CouchDB basic authentication.")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text
+						.setPlaceholder("Password")
+						.setValue(this.plugin.settings.couchDbPassword)
+						.onChange(async (value) => {
+							this.plugin.settings.couchDbPassword = value;
+							await this.plugin.saveSettings();
+						});
+				});
+		} else if (this.plugin.settings.remoteBackend === "nextcloud") {
+			new Setting(remoteSectionEl)
+				.setName("Nextcloud URL")
+				.setDesc("Base URL for the Nextcloud server (e.g., https://cloud.example.com).")
+				.addText((text) =>
+					text
+						.setPlaceholder("https://cloud.example.com")
+						.setValue(this.plugin.settings.nextcloudUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.nextcloudUrl = value.trim().replace(/\/+$/g, "");
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("Nextcloud username")
+				.setDesc("Username for Nextcloud login.")
+				.addText((text) =>
+					text
+						.setPlaceholder("username")
+						.setValue(this.plugin.settings.nextcloudUsername)
+						.onChange(async (value) => {
+							this.plugin.settings.nextcloudUsername = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("Nextcloud App Password")
+				.setDesc("Use an App Password generated in your Nextcloud security settings, NOT your main password.")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text
+						.setPlaceholder("App Password")
+						.setValue(this.plugin.settings.nextcloudPassword)
+						.onChange(async (value) => {
+							this.plugin.settings.nextcloudPassword = value;
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(remoteSectionEl)
+				.setName("Nextcloud Remote Path")
+				.setDesc("Directory in Nextcloud where files will be synced (e.g., /Notes).")
+				.addText((text) =>
+					text
+						.setPlaceholder("/Notes")
+						.setValue(this.plugin.settings.nextcloudRemotePath)
+						.onChange(async (value) => {
+							this.plugin.settings.nextcloudRemotePath = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+		}
 	}
 
 	private addReadonlyLegacyDateSetting(
