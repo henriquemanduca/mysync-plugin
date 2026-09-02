@@ -312,3 +312,36 @@ function getImageMimeType(extension: string) {
 function getBinaryMimeType(extension: string) {
 	return BINARY_MIME_TYPES[extension];
 }
+
+export async function getAttachmentArrayBuffer(record: VaultFileRecord) {
+	const attachment = record._attachments?.[FILE_ATTACHMENT_ID];
+
+	if (!attachment || !("data" in attachment)) {
+		return null;
+	}
+
+	const data = attachment.data;
+
+	if (data instanceof Blob) {
+		return data.arrayBuffer();
+	}
+
+	return null;
+}
+
+export async function getRecordContentHash(record: VaultFileRecord) {
+	if (record.contentHash) {
+		return record.contentHash;
+	}
+
+	if (record.fileType === "markdown" && typeof record.content === "string") {
+		return createTextContentHash(record.content);
+	}
+
+	const data = await getAttachmentArrayBuffer(record);
+	if (data) {
+		return createBinaryContentHash(data);
+	}
+
+	return null;
+}

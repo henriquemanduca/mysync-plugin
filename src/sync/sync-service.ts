@@ -31,9 +31,12 @@ import {
 	isObsidianConfigFilePath,
 	isSyncableVaultFile,
 	isPathInsideSyncFolder,
-	listObsidianConfigFilePaths
+	listObsidianConfigFilePaths,
+	getAttachmentArrayBuffer,
+	getRecordContentHash
 } from "./vault-files";
 import { Logger } from "../utils/logger";
+import { validateCouchDbSettings, createCouchDbConnection, getPendingPushBlockingState } from "./couchdb-utils";
 
 interface LocalSyncResult {
 	total: number;
@@ -1017,7 +1020,7 @@ export class SyncService {
 			}
 
 			logger.debug("Executing pull from CouchDb");
-			const localRecordsBeforePull = await this.localStore.listFileRecords();
+			const localRecordsBeforePull = await this.localStore.listFileRecords({ attachments: false });
 			const localRecordsById = new Map(localRecordsBeforePull.map(
 				(record) => [record._id, record])
 			);
@@ -1602,7 +1605,7 @@ export class SyncService {
 
 		const currentRecordIds = new Set(paths.map(createFileRecordId));
 
-		const missingRecords = (await this.localStore.listFileRecords()).filter(
+		const missingRecords = (await this.localStore.listFileRecords({ attachments: false })).filter(
 			(record) => record.source === "obsidian-config"
 				&& !currentRecordIds.has(record._id)
 				&& !this.conflictedPaths.has(record.path)
@@ -1666,7 +1669,7 @@ export class SyncService {
 		let conflicts = 0;
 		let configurationChanged = false;
 
-		const records = await this.localStore.listFileRecords();
+		const records = await this.localStore.listFileRecords({ attachments: false });
 		this.applyingRemoteChange = true;
 
 		try {
@@ -1738,7 +1741,10 @@ export class SyncService {
 				return "skipped";
 			}
 
-			await this.writeRecordToVault(record, path);
+			const fullRecord = await this.localStore.getFileRecordWithAttachments(record._id);
+			if (!fullRecord) return "skipped";
+
+			await this.writeRecordToVault(fullRecord, path);
 			return "restored";
 		}
 
@@ -1748,7 +1754,10 @@ export class SyncService {
 				return "skipped";
 			}
 
-			await this.overwriteLocalFile(record, existingFile);
+			const fullRecord = await this.localStore.getFileRecordWithAttachments(record._id);
+			if (!fullRecord) return "skipped";
+
+			await this.overwriteLocalFile(fullRecord, existingFile);
 			return "restored";
 		}
 
@@ -1764,7 +1773,10 @@ export class SyncService {
 		}
 
 		if (!fileTypeIstext) {
-			const data = await getAttachmentArrayBuffer(record);
+			const fullRecord = await this.localStore.getFileRecordWithAttachments(record._id);
+			if (!fullRecord) return "skipped";
+
+			const data = await getAttachmentArrayBuffer(fullRecord);
 			if (!data) return "skipped";
 
 			await this.app.vault.createBinary(path, data);
@@ -1885,15 +1897,7 @@ export class SyncService {
 	}
 
 	private async deleteFileRecordsInsideFolder(folderPath: string) {
-		const prefix = `${folderPath.replace(/\/+$/g, "")}/`;
-		const records = (await this.localStore.listFileRecords()).filter(
-			(record) => record.path.startsWith(prefix)
-				&& !this.conflictedPaths.has(record.path)
-		);
-
-		for (const record of records) {
-			await this.localStore.deleteFileRecordById(record._id);
-		}
+		await this.localStore.deleteFileRecordsByPathPrefix(folderPath, this.conflictedPaths);
 	}
 
 	getEmptyVaultFolderCount() {
@@ -2269,33 +2273,6 @@ export class SyncService {
 	}
 }
 
-function getPendingPushBlockingState(
-	hasLocalSyncBaseline: boolean,
-	hasRemoteBaseline: boolean
-): { statusMessage: string; noticeMessage: string } | null {
-	if (!hasLocalSyncBaseline && !hasRemoteBaseline) {
-		return {
-			statusMessage: "Local and remote baselines required",
-			noticeMessage: "Run a full local sync and establish the remote baseline with a full push or pull before pushing pending changes."
-		};
-	}
-
-	if (!hasLocalSyncBaseline) {
-		return {
-			statusMessage: "Full local sync required",
-			noticeMessage: "Run Sync now before pushing pending changes."
-		};
-	}
-
-	if (!hasRemoteBaseline) {
-		return {
-			statusMessage: "Remote baseline required",
-			noticeMessage: "Run a full push or pull before pushing pending changes."
-		};
-	}
-
-	return null;
-}
 
 function createConflictId(recordId: string) {
 	return `mysync-conflict:${recordId}`;
@@ -2305,21 +2282,6 @@ function arraysEqual(left: string[], right: string[]) {
 	return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing") {
-	if (!settings.couchDbUrl) {
-		return `Set a CouchDB URL before ${operation}.`;
-	}
-
-	if (!isHttpUrl(settings.couchDbUrl)) {
-		return `Set a valid CouchDB URL before ${operation}.`;
-	}
-
-	if (!settings.couchDbDatabase) {
-		return `Set a CouchDB database before ${operation}.`;
-	}
-
-	return null;
-}
 
 function validateNextcloudSettings(settings: MySyncSettings, operation = "pushing") {
 	if (!settings.nextcloudUrl) {
@@ -2337,14 +2299,6 @@ function validateNextcloudSettings(settings: MySyncSettings, operation = "pushin
 	return null;
 }
 
-function createCouchDbConnection(settings: MySyncSettings): CouchDbConnection {
-	return {
-		url: settings.couchDbUrl,
-		database: settings.couchDbDatabase,
-		username: settings.couchDbUsername,
-		password: settings.couchDbPassword
-	};
-}
 
 function createNextcloudConnection(settings: MySyncSettings): NextcloudConnection {
 	return {
@@ -2401,35 +2355,4 @@ function normalizeRestoredPath(path: string) {
 	return normalizedPath;
 }
 
-async function getAttachmentArrayBuffer(record: VaultFileRecord) {
-	const attachment = record._attachments?.file;
 
-	if (!attachment || !("data" in attachment)) {
-		return null;
-	}
-
-	const data = attachment.data;
-
-	if (data instanceof Blob) {
-		return data.arrayBuffer();
-	}
-
-	return null;
-}
-
-async function getRecordContentHash(record: VaultFileRecord) {
-	if (record.contentHash) {
-		return record.contentHash;
-	}
-
-	if (record.fileType === "markdown" && typeof record.content === "string") {
-		return createTextContentHash(record.content);
-	}
-
-	const data = await getAttachmentArrayBuffer(record);
-	if (data) {
-		return createBinaryContentHash(data);
-	}
-
-	return null;
-}

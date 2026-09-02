@@ -1,5 +1,5 @@
 PLUGIN_ID := mysync
-OBSIDIAN_VAULTS := /home/henrique/projetos/pessoal/note-brain /home/henrique/projetos/pessoal/note-brain-out/
+OBSIDIAN_VAULTS := /home/henrique/projetos/pessoal/note-brain /home/henrique/projetos/pessoal/note-test
 
 .PHONY: major patch build deploy
 

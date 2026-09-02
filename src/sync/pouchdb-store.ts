@@ -174,6 +174,26 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async deleteFileRecordsByPathPrefix(folderPath: string, excludedPaths?: Set<string>) {
+		return this.runWithLocalDb("deleteFileRecordsByPathPrefix", async (fileDb) => {
+			const prefix = `${folderPath.replace(/\/+$/g, "")}/`;
+			const startkey = createFileRecordId(prefix);
+			const endkey = createFileRecordId(`${prefix}\ufff0`);
+
+			const result = await fileDb.allDocs({
+				startkey,
+				endkey,
+				include_docs: true
+			});
+
+			for (const row of result.rows) {
+				if (row.doc && isSyncableFileRecordId(row.id) && (!excludedPaths || !excludedPaths.has(row.doc.path))) {
+					await fileDb.remove(row.doc);
+				}
+			}
+		});
+	}
+
 	async pushToCouchDb(
 		connection: CouchDbConnection,
 		onProgress: (docsWritten: number) => void,
@@ -446,10 +466,10 @@ export class PouchDbFileStore {
 		});
 	}
 
-	async listFileRecords() {
+	async listFileRecords(options: { attachments?: boolean } = { attachments: true }) {
 		logger.debug("Local file list records requested");
 		return this.runWithLocalDb("listFileRecords", async (fileDb) => {
-			return this.listFileRecordsFromDb(fileDb);
+			return this.listFileRecordsFromDb(fileDb, options);
 		});
 	}
 
@@ -586,6 +606,19 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async getFileRecordWithAttachments(recordId: string) {
+		return this.runWithLocalDb("getFileRecordWithAttachments", async (fileDb) => {
+			try {
+				return await fileDb.get(recordId, { attachments: true, binary: true }) as VaultFileRecord & PouchDB.ExistingDocument;
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					return null;
+				}
+				throw error;
+			}
+		});
+	}
+
 	async resolveFileRecordWithContent(
 		recordId: string,
 		sourceRecord: VaultFileRecord & { _rev?: string; _deleted?: boolean },
@@ -656,7 +689,7 @@ export class PouchDbFileStore {
 
 	private async listSyncableFileRecordIdsFromDb(fileDb: PouchDB<VaultFileRecord>) {
 		logger.debug("List syncable file record ids from active database requested");
-		const records = await this.listFileRecordsFromDb(fileDb);
+		const records = await this.listFileRecordsFromDb(fileDb, { attachments: false });
 		const recordIds = records
 			.map((record) => record._id)
 			.filter(isSyncableFileRecordId);
@@ -669,11 +702,14 @@ export class PouchDbFileStore {
 		return recordIds;
 	}
 
-	private async listFileRecordsFromDb(fileDb: PouchDB<VaultFileRecord>) {
+	private async listFileRecordsFromDb(
+		fileDb: PouchDB<VaultFileRecord>,
+		options: { attachments?: boolean } = { attachments: true }
+	) {
 		const result = await fileDb.allDocs({
 			include_docs: true,
-			attachments: true,
-			binary: true
+			attachments: options.attachments,
+			binary: options.attachments
 		});
 
 		return result.rows.flatMap(
