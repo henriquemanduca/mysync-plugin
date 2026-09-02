@@ -25,8 +25,8 @@ export interface MySyncSettings {
 	nextcloudRemotePath: string;
 	logLevel: LoggerLevel;
 	lastSyncNowAt: string;
-	lastPushToCouchDbAt: string;
-	lastPullFromCouchDbAt: string;
+	lastRemotePushAt: string;
+	lastRemotePullAt: string;
 	lastLocalDatabaseResetAt: string;
 }
 
@@ -47,8 +47,8 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	nextcloudRemotePath: "/",
 	logLevel: "debug",
 	lastSyncNowAt: "",
-	lastPushToCouchDbAt: "",
-	lastPullFromCouchDbAt: "",
+	lastRemotePushAt: "",
+	lastRemotePullAt: "",
 	lastLocalDatabaseResetAt: ""
 };
 
@@ -169,14 +169,14 @@ export class MySyncSettingTab extends PluginSettingTab {
 						"lastSyncNowAt"
 					),
 					this.createReadonlyDateSetting(
-						"Last push to CouchDB",
+						"Last push to remote",
 						"Last successful remote push execution.",
-						"lastPushToCouchDbAt"
+						"lastRemotePushAt"
 					),
 					this.createReadonlyDateSetting(
-						"Last pull from CouchDB",
+						"Last pull from remote",
 						"Last successful remote pull execution.",
-						"lastPullFromCouchDbAt"
+						"lastRemotePullAt"
 					)
 				]
 			},
@@ -192,7 +192,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					),
 					{
 						name: "Reset local databases",
-						desc: "Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.",
+						desc: "Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote data are not changed.",
 						render: (setting) => {
 							setting.addButton((button) => {
 								button.setButtonText("Reset local databases");
@@ -378,8 +378,8 @@ export class MySyncSettingTab extends PluginSettingTab {
 		desc: string,
 		key:
 			| "lastSyncNowAt"
-			| "lastPushToCouchDbAt"
-			| "lastPullFromCouchDbAt"
+			| "lastRemotePushAt"
+			| "lastRemotePullAt"
 			| "lastLocalDatabaseResetAt"
 	): SettingGroupItem {
 		return {
@@ -512,15 +512,15 @@ export class MySyncSettingTab extends PluginSettingTab {
 		);
 		this.addReadonlyLegacyDateSetting(
 			localSectionEl,
-			"Last push to CouchDB",
+			"Last push to remote",
 			"Last successful remote push execution.",
-			this.plugin.settings.lastPushToCouchDbAt
+			this.plugin.settings.lastRemotePushAt
 		);
 		this.addReadonlyLegacyDateSetting(
 			localSectionEl,
-			"Last pull from CouchDB",
+			"Last pull from remote",
 			"Last successful remote pull execution.",
-			this.plugin.settings.lastPullFromCouchDbAt
+			this.plugin.settings.lastRemotePullAt
 		);
 
 		this.addReadonlyLegacyDateSetting(
@@ -532,7 +532,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 
 		new Setting(localDataSectionEl)
 			.setName("Reset local databases")
-			.setDesc("Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote CouchDB data are not changed.")
+			.setDesc("Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote data are not changed.")
 			.addButton((button) => {
 				button.setButtonText("Reset local databases");
 				setDestructiveButton(button)

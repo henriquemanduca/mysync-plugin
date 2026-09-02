@@ -60,13 +60,16 @@ function createFixture(configDir = ".obsidian") {
 	} as unknown as App;
 	const store = {
 		deleteFileRecordById: vi.fn().mockResolvedValue(undefined),
+		getNextcloudPushCheckpoint: vi.fn().mockResolvedValue(null),
 		listAllFileRecordIds: vi.fn().mockResolvedValue([]),
+		listFileChangesSince: vi.fn().mockResolvedValue({ changes: [], lastSequence: 0 }),
 		listFileRecords: vi.fn().mockResolvedValue([]),
 		listFileRevisionStates: vi.fn().mockResolvedValue([]),
 		markLocalSyncBaseline: vi.fn().mockResolvedValue(undefined),
 		markRemoteBaseline: vi.fn().mockResolvedValue(undefined),
 		pullFromCouchDb: vi.fn().mockResolvedValue({ docsRead: 0 }),
 		resolveFileRecordAsDeleted: vi.fn().mockResolvedValue(undefined),
+		saveNextcloudPushCheckpoint: vi.fn().mockResolvedValue(undefined),
 		saveFileRecordIfChanged: vi.fn().mockResolvedValue(true)
 	};
 	const conflictStore = {
@@ -80,14 +83,20 @@ function createFixture(configDir = ".obsidian") {
 		localConflictDatabase: "mysync-conflicts-local",
 		syncFolderMode: "vault-root",
 		customSyncFolder: "",
+		syncObsidianConfig: true,
+		remoteBackend: "couchdb",
 		couchDbUrl: "",
 		couchDbDatabase: "mysync",
 		couchDbUsername: "",
 		couchDbPassword: "",
+		nextcloudUrl: "",
+		nextcloudUsername: "",
+		nextcloudPassword: "",
+		nextcloudRemotePath: "/",
 		logLevel: "off",
 		lastSyncNowAt: "",
-		lastPushToCouchDbAt: "",
-		lastPullFromCouchDbAt: "",
+		lastRemotePushAt: "",
+		lastRemotePullAt: "",
 		lastLocalDatabaseResetAt: ""
 	};
 	const statuses: SyncStatus[] = [];
@@ -129,6 +138,26 @@ function markdownRecord(path: string, content = "hello"): VaultFileRecord {
 		lastChanged: 100,
 		lastChangedIso: new Date(100).toISOString()
 	};
+}
+
+function configureNextcloud(fixture: ReturnType<typeof createFixture>) {
+	fixture.settings.remoteBackend = "nextcloud";
+	fixture.settings.nextcloudUrl = "https://cloud.example.com/";
+	fixture.settings.nextcloudUsername = "alice";
+	fixture.settings.nextcloudPassword = "secret-password";
+	fixture.settings.nextcloudRemotePath = "/Notes/";
+	const pushChanges = vi.fn().mockResolvedValue({
+		uploaded: 0,
+		deleted: 0,
+		skipped: 0,
+		errors: 0
+	});
+
+	(fixture.service as unknown as {
+		nextcloudService: { pushChanges: typeof pushChanges };
+	}).nextcloudService = { pushChanges };
+
+	return pushChanges;
 }
 
 function configureVaultTree(
@@ -320,7 +349,7 @@ describe("SyncService configuration synchronization", () => {
 			expect.any(ArrayBuffer)
 		);
 		expect(fixture.store.markRemoteBaseline).toHaveBeenCalledOnce();
-		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("pullFromCouchDb");
+		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePull");
 		expect(Notice.instances.at(-1)?.message)
 			.toContain("Reload Obsidian to apply configuration changes.");
 	});
@@ -602,5 +631,180 @@ describe("SyncService empty vault folder cleanup", () => {
 
 		expect(fixture.fileManager.trashFile).toHaveBeenCalledTimes(1);
 		expect(root.children).toEqual([area]);
+	});
+});
+
+describe("SyncService Nextcloud push", () => {
+	beforeEach(() => {
+		Logger.setLevel("off");
+	});
+
+	afterEach(() => {
+		Logger.setLevel("debug");
+	});
+
+	it("pushes all live records and pending tombstones during a full push", async () => {
+		const fixture = createFixture();
+		const pushChanges = configureNextcloud(fixture);
+		const record = markdownRecord("Area/current.md");
+		fixture.store.listFileRecords.mockResolvedValue([record]);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:Area/deleted.md",
+				path: "Area/deleted.md",
+				deleted: true
+			}],
+			lastSequence: 7
+		});
+		pushChanges.mockResolvedValue({ uploaded: 1, deleted: 1, skipped: 0, errors: 0 });
+
+		await fixture.service.pushToRemote();
+
+		expect(fixture.store.listFileChangesSince).toHaveBeenCalledWith(0);
+		expect(pushChanges).toHaveBeenCalledWith(
+			expect.objectContaining({ remotePath: "/Notes/" }),
+			{
+				records: [record],
+				deletedPaths: ["Area/deleted.md"]
+			},
+			expect.any(Function)
+		);
+		expect(fixture.store.saveNextcloudPushCheckpoint)
+			.toHaveBeenCalledWith(expect.any(String), 7);
+		const targetKey = fixture.store.saveNextcloudPushCheckpoint.mock.calls[0]?.[0];
+		expect(targetKey).toContain("https://cloud.example.com");
+		expect(targetKey).not.toContain("secret-password");
+		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePush");
+		expect(Notice.instances.at(-1)?.message)
+			.toBe("Nextcloud: uploaded 1, deleted 1, skipped 0.");
+	});
+
+	it("pushes only changes after the checkpoint during a pending push", async () => {
+		const fixture = createFixture();
+		const pushChanges = configureNextcloud(fixture);
+		const changedRecord = markdownRecord("Area/changed.md", "updated");
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(11);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: changedRecord._id,
+				path: changedRecord.path,
+				deleted: false,
+				record: { ...changedRecord, _rev: "2-change" }
+			}, {
+				recordId: "vault-file:Area/deleted.md",
+				path: "Area/deleted.md",
+				deleted: true
+			}],
+			lastSequence: 14
+		});
+		pushChanges.mockResolvedValue({ uploaded: 1, deleted: 1, skipped: 0, errors: 0 });
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(fixture.store.listFileChangesSince).toHaveBeenCalledWith(11);
+		expect(pushChanges).toHaveBeenCalledWith(
+			expect.any(Object),
+			{
+				records: [{ ...changedRecord, _rev: "2-change" }],
+				deletedPaths: ["Area/deleted.md"]
+			},
+			expect.any(Function)
+		);
+		expect(fixture.store.saveNextcloudPushCheckpoint)
+			.toHaveBeenCalledWith(expect.any(String), 14);
+	});
+
+	it("blocks a pending push until a full Nextcloud checkpoint exists", async () => {
+		const fixture = createFixture();
+		const pushChanges = configureNextcloud(fixture);
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(fixture.store.listFileChangesSince).not.toHaveBeenCalled();
+		expect(pushChanges).not.toHaveBeenCalled();
+		expect(fixture.store.saveNextcloudPushCheckpoint).not.toHaveBeenCalled();
+		expect(Notice.instances.at(-1)?.message)
+			.toBe("Run a full Nextcloud push before pushing pending changes.");
+	});
+
+	it("keeps the checkpoint unchanged when a remote operation fails", async () => {
+		const fixture = createFixture();
+		const pushChanges = configureNextcloud(fixture);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:deleted.md",
+				path: "deleted.md",
+				deleted: true
+			}],
+			lastSequence: 3
+		});
+		pushChanges.mockResolvedValue({ uploaded: 0, deleted: 0, skipped: 0, errors: 1 });
+
+		await fixture.service.pushToRemote();
+
+		expect(fixture.store.saveNextcloudPushCheckpoint).not.toHaveBeenCalled();
+		expect(fixture.onOperationCompleted).not.toHaveBeenCalled();
+		expect(fixture.statuses.at(-1)).toEqual({
+			state: "error",
+			message: "Nextcloud push completed with errors"
+		});
+	});
+
+	it("does not upload or delete paths outside the current sync folder", async () => {
+		const fixture = createFixture();
+		const pushChanges = configureNextcloud(fixture);
+		const insideRecord = markdownRecord("Sync/current.md");
+		const outsideRecord = markdownRecord("Private/current.md");
+		const syncFolder = new TFolder("Sync");
+		configureVaultTree(fixture, new TFolder("/", [syncFolder]));
+		fixture.settings.syncFolderMode = "custom";
+		fixture.settings.customSyncFolder = "Sync";
+		fixture.store.listFileRecords.mockResolvedValue([insideRecord, outsideRecord]);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:Sync/deleted.md",
+				path: "Sync/deleted.md",
+				deleted: true
+			}, {
+				recordId: "vault-file:Private/deleted.md",
+				path: "Private/deleted.md",
+				deleted: true
+			}],
+			lastSequence: 9
+		});
+		pushChanges.mockResolvedValue({ uploaded: 1, deleted: 1, skipped: 0, errors: 0 });
+
+		await fixture.service.pushToRemote();
+
+		expect(pushChanges).toHaveBeenCalledWith(
+			expect.any(Object),
+			{
+				records: [insideRecord],
+				deletedPaths: ["Sync/deleted.md"]
+			},
+			expect.any(Function)
+		);
+	});
+
+	it("creates tombstones for every known file when a folder is deleted", async () => {
+		const fixture = createFixture();
+		const deletedFolder = new TFolder("Area", [
+			new TFile("Area/one.md"),
+			new TFile("Area/Nested/two.md")
+		]);
+		fixture.store.listFileRecords.mockResolvedValue([
+			markdownRecord("Area/one.md"),
+			markdownRecord("Area/Nested/two.md"),
+			markdownRecord("Other/keep.md")
+		]);
+
+		await fixture.service.handleDeletedFile(
+			deletedFolder as unknown as Parameters<typeof fixture.service.handleDeletedFile>[0]
+		);
+
+		expect(fixture.store.deleteFileRecordById.mock.calls).toEqual([
+			["vault-file:Area/one.md"],
+			["vault-file:Area/Nested/two.md"]
+		]);
 	});
 });

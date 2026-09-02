@@ -37,11 +37,32 @@ export interface FileRevisionState {
 	leaves: FileRevisionLeaf[];
 }
 
+export type PouchDbSequence = string | number;
+
+export type FileChange =
+	| {
+		recordId: string;
+		path: string;
+		deleted: true;
+	}
+	| {
+		recordId: string;
+		path: string;
+		deleted: false;
+		record: VaultFileRecord & PouchDB.ExistingDocument;
+	};
+
+export interface FileChangeBatch {
+	changes: FileChange[];
+	lastSequence: PouchDbSequence;
+}
+
 const logger = new Logger("PouchDbFileStore");
 const VAULT_FILE_START_KEY = "vault-file:";
 const VAULT_FILE_END_KEY = "vault-file:\ufff0";
 const LOCAL_SYNC_BASELINE_LOCAL_DOC_ID = "_local/mysync-local-sync-baseline";
 const REMOTE_BASELINE_LOCAL_DOC_PREFIX = "_local/mysync-remote-baseline:";
+const NEXTCLOUD_PUSH_CHECKPOINT_LOCAL_DOC_PREFIX = "_local/mysync-nextcloud-push:";
 
 type OpenRevision<T extends { _id: string }> =
 	| { ok: (T & PouchDB.ExistingDocument) | (PouchDB.ExistingDocument & { _deleted: true }) }
@@ -70,11 +91,23 @@ interface LocalSyncBaselineDocument {
 	savedAt: string;
 }
 
-type BaselineDocument = LocalSyncBaselineDocument | RemoteBaselineDocument;
+interface NextcloudPushCheckpointDocument {
+	_id: string;
+	_rev?: string;
+	type: "mysync-nextcloud-push-checkpoint";
+	targetKey: string;
+	lastSequence: PouchDbSequence;
+	savedAt: string;
+}
+
+type LocalMetadataDocument =
+	| LocalSyncBaselineDocument
+	| RemoteBaselineDocument
+	| NextcloudPushCheckpointDocument;
 
 interface LocalDocumentStore {
-	get(id: string): Promise<BaselineDocument & PouchDB.ExistingDocument>;
-	put(doc: BaselineDocument): Promise<unknown>;
+	get(id: string): Promise<LocalMetadataDocument & PouchDB.ExistingDocument>;
+	put(doc: LocalMetadataDocument): Promise<unknown>;
 }
 
 export class PouchDbFileStore {
@@ -420,6 +453,104 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async listFileChangesSince(since: PouchDbSequence): Promise<FileChangeBatch> {
+		return this.runWithLocalDb("listFileChangesSince", async (fileDb) => {
+			const result = await fileDb.changes({
+				since,
+				style: "main_only",
+				include_docs: true,
+				attachments: true,
+				binary: true
+			});
+			const changes = result.results.flatMap((change): FileChange[] => {
+				if (!isSyncableFileRecordId(change.id)) {
+					return [];
+				}
+
+				const path = getPathFromFileRecordId(change.id);
+
+				if (!path) {
+					return [];
+				}
+
+				if (change.deleted || change.doc?._deleted) {
+					return [{
+						recordId: change.id,
+						path,
+						deleted: true
+					}];
+				}
+
+				if (!change.doc) {
+					return [];
+				}
+
+				return [{
+					recordId: change.id,
+					path,
+					deleted: false,
+					record: change.doc as VaultFileRecord & PouchDB.ExistingDocument
+				}];
+			});
+
+			return {
+				changes,
+				lastSequence: result.last_seq
+			};
+		});
+	}
+
+	async getNextcloudPushCheckpoint(targetKey: string): Promise<PouchDbSequence | null> {
+		return this.runWithLocalDb("getNextcloudPushCheckpoint", async (fileDb) => {
+			const checkpointId = await createNextcloudPushCheckpointLocalDocumentId(targetKey);
+
+			try {
+				const checkpoint = await getLocalDocumentStore(fileDb).get(checkpointId);
+				return checkpoint.type === "mysync-nextcloud-push-checkpoint"
+					? checkpoint.lastSequence
+					: null;
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					return null;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async saveNextcloudPushCheckpoint(
+		targetKey: string,
+		lastSequence: PouchDbSequence
+	) {
+		return this.runWithLocalDb("saveNextcloudPushCheckpoint", async (fileDb) => {
+			const checkpointId = await createNextcloudPushCheckpointLocalDocumentId(targetKey);
+			const localDocs = getLocalDocumentStore(fileDb);
+			const checkpoint: NextcloudPushCheckpointDocument = {
+				_id: checkpointId,
+				type: "mysync-nextcloud-push-checkpoint",
+				targetKey,
+				lastSequence,
+				savedAt: new Date().toISOString()
+			};
+
+			try {
+				const existing = await localDocs.get(checkpointId);
+				await localDocs.put({
+					...checkpoint,
+					_rev: existing._rev
+				});
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					await localDocs.put(checkpoint);
+					return;
+				}
+
+				throw error;
+			}
+		});
+	}
+
 	async listAllFileRecordIds() {
 		return this.runWithLocalDb("listAllFileRecordIds", async (fileDb) => {
 			const changes = await fileDb.changes({
@@ -711,6 +842,10 @@ function createRemoteKey(connection: CouchDbConnection) {
 
 async function createRemoteBaselineLocalDocumentId(connection: CouchDbConnection) {
 	return `${REMOTE_BASELINE_LOCAL_DOC_PREFIX}${await createSha256Hex(createRemoteKey(connection))}`;
+}
+
+async function createNextcloudPushCheckpointLocalDocumentId(targetKey: string) {
+	return `${NEXTCLOUD_PUSH_CHECKPOINT_LOCAL_DOC_PREFIX}${await createSha256Hex(targetKey)}`;
 }
 
 async function createSha256Hex(value: string) {

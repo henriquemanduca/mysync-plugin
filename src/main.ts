@@ -28,8 +28,8 @@ const STRING_SETTING_KEYS = [
 	"nextcloudPassword",
 	"nextcloudRemotePath",
 	"lastSyncNowAt",
-	"lastPushToCouchDbAt",
-	"lastPullFromCouchDbAt",
+	"lastRemotePushAt",
+	"lastRemotePullAt",
 	"lastLocalDatabaseResetAt"
 ] as const;
 
@@ -75,11 +75,11 @@ export default class MySyncPlugin extends Plugin {
 
 		this.addRibbonIcon("database-backup", "Sync local to remote", async () => {
 			// await this.syncService.syncNow();
-			await this.syncService.pushToCouchDb();
+			await this.syncService.pushToRemote();
 		});
 
 		this.addRibbonIcon("file-up", "Push pending files to remote", async () => {
-			await this.syncService.pushPendingFilesToCouchDb();
+			await this.syncService.pushPendingFilesToRemote();
 		});
 
 		this.addCommand({
@@ -94,7 +94,7 @@ export default class MySyncPlugin extends Plugin {
 			id: "push-to-remote",
 			name: "Push to remote",
 			callback: () => {
-				void this.syncService.pushToCouchDb();
+				void this.syncService.pushToRemote();
 			}
 		});
 
@@ -102,7 +102,7 @@ export default class MySyncPlugin extends Plugin {
 			id: "push-pending-files-to-remote",
 			name: "Push pending files to remote",
 			callback: () => {
-				void this.syncService.pushPendingFilesToCouchDb();
+				void this.syncService.pushPendingFilesToRemote();
 			}
 		});
 
@@ -260,10 +260,10 @@ export default class MySyncPlugin extends Plugin {
 
 		if (operation === "syncNow") {
 			this.settings.lastSyncNowAt = completedAt;
-		} else if (operation === "pushToCouchDb") {
-			this.settings.lastPushToCouchDbAt = completedAt;
-		} else if (operation === "pullFromCouchDb") {
-			this.settings.lastPullFromCouchDbAt = completedAt;
+		} else if (operation === "remotePush") {
+			this.settings.lastRemotePushAt = completedAt;
+		} else if (operation === "remotePull") {
+			this.settings.lastRemotePullAt = completedAt;
 		} else {
 			this.settings.lastLocalDatabaseResetAt = completedAt;
 		}
@@ -413,6 +413,15 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 		}
 	}
 
+
+	if (typeof data["lastPushToCouchDbAt"] === "string" && !settings.lastRemotePushAt) {
+		settings.lastRemotePushAt = data["lastPushToCouchDbAt"];
+	}
+
+	if (typeof data["lastPullFromCouchDbAt"] === "string" && !settings.lastRemotePullAt) {
+		settings.lastRemotePullAt = data["lastPullFromCouchDbAt"];
+	}
+
 	if (isSyncFolderMode(data.syncFolderMode)) {
 		settings.syncFolderMode = data.syncFolderMode;
 	}
@@ -443,7 +452,7 @@ function isSyncFolderMode(value: unknown): value is MySyncSettings["syncFolderMo
 function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): SyncStatusView {
 	switch (status.state) {
 		case "idle": {
-			const lastPushAt = formatDateTime(settings.lastPushToCouchDbAt, { includeTime: true });
+			const lastPushAt = formatDateTime(settings.lastRemotePushAt, { includeTime: true });
 
 			return {
 				text: lastPushAt ? lastPushAt : "...",
@@ -476,11 +485,20 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 			};
 		}
 
-		case "pushing":
+		case "pushing": {
+			if (typeof status.totalDocs === "number" && status.totalDocs > 0) {
+				const percent = calculatePercent(status.docsWritten, status.totalDocs);
+				return {
+					text: `pushing ${percent}%`,
+					title: `Pushing to remote (${status.docsWritten}/${status.totalDocs})`
+				};
+			}
+
 			return {
 				text: `pushing ${status.docsWritten}`,
 				title: "Pushing to remote"
 			};
+		}
 
 		case "pushed":
 			return {

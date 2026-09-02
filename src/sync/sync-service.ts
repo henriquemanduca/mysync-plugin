@@ -1,4 +1,5 @@
-import { App, Notice, TAbstractFile, TFile, TFolder, requestUrl } from "obsidian";
+import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
+import { NextcloudService, type NextcloudConnection } from "./nextcloud-service";
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
@@ -72,7 +73,7 @@ export type SyncStatus =
 	| { state: "queued"; pending: number }
 	| { state: "syncing"; current: number; total: number; saved: number; skipped: number }
 	| { state: "done"; total: number; saved: number; skipped: number }
-	| { state: "pushing"; docsWritten: number }
+	| { state: "pushing"; docsWritten: number; totalDocs?: number }
 	| { state: "pushed"; docsWritten: number }
 	| { state: "pulling"; docsRead: number }
 	| { state: "deleting"; current: number; total: number; deleted: number; skipped: number; conflicts: number }
@@ -88,8 +89,8 @@ export type SyncStatus =
 
 export type CompletedSyncOperation =
 	| "syncNow"
-	| "pushToCouchDb"
-	| "pullFromCouchDb"
+	| "remotePush"
+	| "remotePull"
 	| "resetLocalDatabases";
 
 const logger = new Logger("SyncService");
@@ -127,6 +128,7 @@ export class SyncService {
 	private syncQueueTimer: number | null = null;
 	private applyingRemoteChange = false;
 	private conflictedPaths = new Set<string>();
+	private nextcloudService = new NextcloudService();
 
 	constructor(
 		private app: App,
@@ -597,6 +599,185 @@ export class SyncService {
 		}
 	}
 
+	async pushToRemote() {
+		const settings = this.getSettings();
+
+		if (settings.remoteBackend === "nextcloud") {
+			return this.pushToNextcloud(false);
+		}
+
+		return this.pushToCouchDb();
+	}
+
+	async pushPendingFilesToRemote() {
+		const settings = this.getSettings();
+
+		if (settings.remoteBackend === "nextcloud") {
+			return this.pushToNextcloud(true);
+		}
+
+		return this.pushPendingFilesToCouchDb();
+	}
+
+	private async pushToNextcloud(pendingChangesOnly: boolean) {
+		if (this.isRunning()) {
+			logger.info("Nextcloud push skipped because another sync operation is running");
+			return;
+		}
+
+		const settings = this.getSettings();
+		const validationMessage = validateNextcloudSettings(settings);
+
+		if (validationMessage) {
+			logger.warn("Nextcloud push validation failed", undefined, {
+				message: validationMessage
+			});
+			this.onStatusChange({
+				state: "error",
+				message: validationMessage
+			});
+			new Notice(validationMessage);
+			return;
+		}
+
+		if (this.conflictedPaths.size > 0) {
+			this.blockPushForConflicts();
+			return;
+		}
+
+		this.syncInProgress = true;
+		let failed = false;
+		const notice = new Notice(
+			pendingChangesOnly
+				? "Pushing pending changes to Nextcloud."
+				: "Start pushing to Nextcloud.",
+			0
+		);
+
+		try {
+			const connection = createNextcloudConnection(settings);
+			const targetKey = createNextcloudTargetKey(
+				connection,
+				this.getCurrentSyncFolder(),
+				this.isObsidianConfigSyncEnabled()
+			);
+			const checkpoint = await this.localStore.getNextcloudPushCheckpoint(targetKey);
+
+			if (pendingChangesOnly && checkpoint === null) {
+				failed = true;
+				this.onStatusChange({
+					state: "error",
+					message: "Full Nextcloud push required"
+				});
+				new Notice("Run a full Nextcloud push before pushing pending changes.");
+				return;
+			}
+
+			if (pendingChangesOnly) {
+				const pendingPaths = this.takePendingSyncPaths();
+
+				try {
+					await this.syncFilePaths(pendingPaths);
+					await this.syncObsidianConfigurationFiles();
+				} catch (error) {
+					for (const path of pendingPaths) {
+						this.pendingSyncPaths.add(path);
+					}
+
+					throw error;
+				}
+			} else {
+				await this.syncLocalFiles();
+			}
+
+			const changeBatch = await this.localStore.listFileChangesSince(checkpoint ?? 0);
+			const scopedChanges = changeBatch.changes.filter(
+				(change) => this.isPathInsideCurrentSyncScope(change.path)
+			);
+			const records = pendingChangesOnly
+				? scopedChanges.flatMap((change) => change.deleted ? [] : [change.record])
+				: (await this.localStore.listFileRecords()).filter(
+					(record) => this.isPathInsideCurrentSyncScope(record.path)
+				);
+			const deletedPaths = Array.from(new Set(
+				scopedChanges.flatMap((change) => change.deleted ? [change.path] : [])
+			));
+
+			logger.info("Nextcloud push started", {
+				recordCount: records.length,
+				deletedCount: deletedPaths.length,
+				pendingChangesOnly,
+				remotePath: connection.remotePath
+			});
+
+			const result = await this.nextcloudService.pushChanges(
+				connection,
+				{ records, deletedPaths },
+				(progress) => {
+					this.onStatusChange({
+						state: "pushing",
+						docsWritten: progress.uploaded + progress.deleted,
+						totalDocs: progress.total
+					});
+				}
+			);
+
+			logger.info("Nextcloud push completed", {
+				uploaded: result.uploaded,
+				deleted: result.deleted,
+				skipped: result.skipped,
+				errors: result.errors
+			});
+
+			if (result.errors > 0) {
+				failed = true;
+				this.onStatusChange({
+					state: "error",
+					message: "Nextcloud push completed with errors"
+				});
+				new Notice(
+					`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}, errors ${result.errors}. Changes will be retried.`
+				);
+				return;
+			}
+
+			await this.localStore.saveNextcloudPushCheckpoint(
+				targetKey,
+				changeBatch.lastSequence
+			);
+
+			this.onStatusChange({
+				state: "pushed",
+				docsWritten: result.uploaded + result.deleted
+			});
+
+			await this.onOperationCompleted("remotePush");
+			new Notice(
+				`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}.`
+			);
+		} catch (error) {
+			failed = true;
+			notice.hide();
+			logger.error("Nextcloud push failed", error);
+			this.onStatusChange({
+				state: "error",
+				message: "Nextcloud push failed"
+			});
+			new Notice(getErrorMessage(
+				error,
+				"Nextcloud push failed. Check the console for details."
+			));
+		} finally {
+			notice.hide();
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+
+			if (!failed) {
+				this.refreshQueuedStatus();
+			}
+		}
+	}
+
 	async pushToCouchDb() {
 		if (this.isRunning()) {
 			logger.info("Push skipped because another sync operation is running");
@@ -675,7 +856,7 @@ export class SyncService {
 			});
 
 			await this.localStore.markRemoteBaseline(connection);
-			await this.onOperationCompleted("pushToCouchDb");
+			await this.onOperationCompleted("remotePush");
 
 			new Notice(`Pushed ${pushResult.docsWritten} document(s).`);
 		} catch (error) {
@@ -781,7 +962,7 @@ export class SyncService {
 				docsWritten: pushResult.docsWritten
 			});
 
-			await this.onOperationCompleted("pushToCouchDb");
+			await this.onOperationCompleted("remotePush");
 			new Notice(`Pushed ${pushResult.docsWritten} pending document(s).`);
 		} catch (error) {
 			failed = true;
@@ -889,7 +1070,7 @@ export class SyncService {
 				conflicts
 			});
 			await this.localStore.markRemoteBaseline(connection);
-			await this.onOperationCompleted("pullFromCouchDb");
+			await this.onOperationCompleted("remotePull");
 
 			const reloadMessage = restoreResult.configurationChanged
 				|| deletionResult.configurationChanged
@@ -1277,29 +1458,14 @@ export class SyncService {
 		try {
 			this.onStatusChange({ state: "testing" });
 
-			const rootUrl = settings.nextcloudUrl.replace(/\/+$/, "");
-			const webdavUrl = `${rootUrl}/remote.php/webdav/`;
-			
-			const token = btoa(`${settings.nextcloudUsername}:${settings.nextcloudPassword}`);
-			
-			const result = await requestUrl({
-				url: webdavUrl,
-				method: "PROPFIND",
-				headers: {
-					"Authorization": `Basic ${token}`,
-					"Depth": "0"
-				}
-			});
+			const connection = createNextcloudConnection(settings);
+			await this.nextcloudService.testConnection(connection);
 
-			if (result.status >= 200 && result.status < 300) {
-				this.onStatusChange({
-					state: "tested",
-					databaseName: "Nextcloud",
-				});
-				new Notice("Connected to Nextcloud successfully");
-			} else {
-				throw new Error(`HTTP Error: ${result.status}`);
-			}
+			this.onStatusChange({
+				state: "tested",
+				databaseName: "Nextcloud",
+			});
+			new Notice("Connected to Nextcloud successfully");
 		} catch (error) {
 			failed = true;
 			logger.error("Nextcloud connection test failed", error);
@@ -1678,6 +1844,18 @@ export class SyncService {
 			return;
 		}
 
+		if (abstractFile instanceof TFolder) {
+			if (isPathInsideSyncFolder(oldPath, this.getCurrentSyncFolder())) {
+				await this.deleteFileRecordsInsideFolder(oldPath);
+			}
+
+			for (const file of collectSyncableFilesInFolder(abstractFile)) {
+				this.queueFileSync(file);
+			}
+
+			return;
+		}
+
 		if (!isSyncBlacklistedPath(oldPath)) {
 			await this.localStore.deleteFileRecordByPath(oldPath);
 		}
@@ -1691,10 +1869,30 @@ export class SyncService {
 		}
 
 		if (
+			abstractFile instanceof TFolder
+			&& isPathInsideSyncFolder(abstractFile.path, this.getCurrentSyncFolder())
+		) {
+			await this.deleteFileRecordsInsideFolder(abstractFile.path);
+			return;
+		}
+
+		if (
 			abstractFile instanceof TFile
 			&& this.isFileInsideCurrentSyncFolder(abstractFile)
 		) {
 			await this.localStore.deleteFileRecordByPath(abstractFile.path);
+		}
+	}
+
+	private async deleteFileRecordsInsideFolder(folderPath: string) {
+		const prefix = `${folderPath.replace(/\/+$/g, "")}/`;
+		const records = (await this.localStore.listFileRecords()).filter(
+			(record) => record.path.startsWith(prefix)
+				&& !this.conflictedPaths.has(record.path)
+		);
+
+		for (const record of records) {
+			await this.localStore.deleteFileRecordById(record._id);
 		}
 	}
 
@@ -2146,6 +2344,29 @@ function createCouchDbConnection(settings: MySyncSettings): CouchDbConnection {
 		username: settings.couchDbUsername,
 		password: settings.couchDbPassword
 	};
+}
+
+function createNextcloudConnection(settings: MySyncSettings): NextcloudConnection {
+	return {
+		url: settings.nextcloudUrl,
+		username: settings.nextcloudUsername,
+		password: settings.nextcloudPassword,
+		remotePath: settings.nextcloudRemotePath
+	};
+}
+
+function createNextcloudTargetKey(
+	connection: NextcloudConnection,
+	syncFolder: string,
+	syncObsidianConfig: boolean
+) {
+	return JSON.stringify({
+		url: connection.url.replace(/\/+$/g, ""),
+		username: connection.username,
+		remotePath: connection.remotePath.replace(/^\/+|\/+$/g, ""),
+		syncFolder,
+		syncObsidianConfig
+	});
 }
 
 function isHttpUrl(value: string) {
