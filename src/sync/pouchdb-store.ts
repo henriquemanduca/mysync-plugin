@@ -677,7 +677,7 @@ export class PouchDbFileStore {
 		});
 
 		return result.rows.flatMap(
-			(row) => (row.doc ? [row.doc] : [])
+			(row) => (row.doc && isSyncableFileRecordId(row.id) ? [row.doc] : [])
 		);
 	}
 

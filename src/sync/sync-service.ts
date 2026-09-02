@@ -716,7 +716,7 @@ export class SyncService {
 				(progress) => {
 					this.onStatusChange({
 						state: "pushing",
-						docsWritten: progress.uploaded + progress.deleted,
+						docsWritten: progress.current,
 						totalDocs: progress.total
 					});
 				}
