@@ -99,8 +99,12 @@ const SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES = new Set([
 	"workspace.json"
 ]);
 
-function isSyncedObsidianConfigurationFilePath(app: App, path: string) {
-	if (!isObsidianConfigFilePath(app, path)) {
+function isSyncedObsidianConfigurationFilePath(
+	app: App,
+	path: string,
+	syncEnabled = true
+) {
+	if (!syncEnabled || !isObsidianConfigFilePath(app, path)) {
 		return false;
 	}
 
@@ -108,9 +112,13 @@ function isSyncedObsidianConfigurationFilePath(app: App, path: string) {
 	return SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES.has(fileName);
 }
 
-function isExcludedObsidianConfigurationFilePath(app: App, path: string) {
+function isExcludedObsidianConfigurationFilePath(
+	app: App,
+	path: string,
+	syncEnabled = true
+) {
 	return isObsidianConfigFilePath(app, path)
-		&& !isSyncedObsidianConfigurationFilePath(app, path);
+		&& !isSyncedObsidianConfigurationFilePath(app, path, syncEnabled);
 }
 
 export class SyncService {
@@ -132,6 +140,26 @@ export class SyncService {
 		this.onStatusChange({ state: "idle" });
 	}
 
+	private isObsidianConfigSyncEnabled(): boolean {
+		return this.getSettings().syncObsidianConfig;
+	}
+
+	private isSyncedObsidianConfigurationFilePath(path: string): boolean {
+		return isSyncedObsidianConfigurationFilePath(
+			this.app,
+			path,
+			this.isObsidianConfigSyncEnabled()
+		);
+	}
+
+	private isExcludedObsidianConfigurationFilePath(path: string): boolean {
+		return isExcludedObsidianConfigurationFilePath(
+			this.app,
+			path,
+			this.isObsidianConfigSyncEnabled()
+		);
+	}
+
 	async initialize() {
 		await this.conflictStore.ensureDatabaseExists();
 		await this.cleanupExcludedObsidianConfigurationRecords();
@@ -140,7 +168,7 @@ export class SyncService {
 
 	async listActiveConflicts() {
 		return (await this.conflictStore.listActiveConflicts()).filter(
-			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+			(conflict) => !this.isExcludedObsidianConfigurationFilePath(conflict.path)
 		);
 	}
 
@@ -469,7 +497,7 @@ export class SyncService {
 
 	private async refreshActiveConflicts() {
 		const conflicts = (await this.conflictStore.listActiveConflicts()).filter(
-			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+			(conflict) => !this.isExcludedObsidianConfigurationFilePath(conflict.path)
 		);
 		this.conflictedPaths = new Set(conflicts.map((conflict) => conflict.path));
 		this.onConflictsChanged(conflicts);
@@ -891,7 +919,7 @@ export class SyncService {
 	): Promise<PullClassification> {
 		const statesBeforeById = new Map(statesBeforePull.map((state) => [state.recordId, state]));
 		const activeConflicts = (await this.conflictStore.listActiveConflicts()).filter(
-			(conflict) => !isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+			(conflict) => !this.isExcludedObsidianConfigurationFilePath(conflict.path)
 		);
 		const activeConflictsByRecordId = new Map(activeConflicts.map(
 			(conflict) => [conflict.recordId, conflict]
@@ -990,14 +1018,14 @@ export class SyncService {
 	) {
 		const activeConflicts = await this.conflictStore.listActiveConflicts();
 		const excludedConflicts = activeConflicts.filter(
-			(conflict) => isExcludedObsidianConfigurationFilePath(this.app, conflict.path)
+			(conflict) => this.isExcludedObsidianConfigurationFilePath(conflict.path)
 		);
 		const excludedRecordIds = new Set(
 			revisionStates.flatMap((state) => {
 				const rawPath = getPathFromFileRecordId(state.recordId);
 				const path = rawPath ? normalizeRestoredPath(rawPath) : "";
 
-				return path && isExcludedObsidianConfigurationFilePath(this.app, path)
+				return path && this.isExcludedObsidianConfigurationFilePath(path)
 					? [state.recordId]
 					: [];
 			})
@@ -1334,8 +1362,10 @@ export class SyncService {
 	private async syncObsidianConfigurationFiles(
 		initialResult: LocalSyncResult = { total: 0, saved: 0, skipped: 0 }
 	): Promise<LocalSyncResult> {
-		const paths = (await listObsidianConfigFilePaths(this.app))
-			.filter((path) => isSyncedObsidianConfigurationFilePath(this.app, path));
+		const paths = this.isObsidianConfigSyncEnabled()
+			? (await listObsidianConfigFilePaths(this.app))
+				.filter((path) => this.isSyncedObsidianConfigurationFilePath(path))
+			: [];
 
 		const currentRecordIds = new Set(paths.map(createFileRecordId));
 
@@ -1799,9 +1829,11 @@ export class SyncService {
 				collectSyncableFilesInFolder(syncFolderState.folder)
 					.map((file) => createFileRecordId(file.path))
 			),
-			listObsidianConfigFilePaths(this.app).then((paths) => paths.filter(
-				(path) => isSyncedObsidianConfigurationFilePath(this.app, path)
-			))
+			this.isObsidianConfigSyncEnabled()
+				? listObsidianConfigFilePaths(this.app).then((paths) => paths.filter(
+					(path) => this.isSyncedObsidianConfigurationFilePath(path)
+				))
+				: Promise.resolve([])
 		]);
 
 		return [
@@ -1817,7 +1849,7 @@ export class SyncService {
 
 	private isPathInsideCurrentSyncScope(path: string) {
 		if (isObsidianConfigFilePath(this.app, path)) {
-			return isSyncedObsidianConfigurationFilePath(this.app, path);
+			return this.isSyncedObsidianConfigurationFilePath(path);
 		}
 
 		return isPathInsideSyncFolder(path, this.getCurrentSyncFolder());

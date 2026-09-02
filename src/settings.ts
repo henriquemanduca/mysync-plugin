@@ -12,6 +12,7 @@ export interface MySyncSettings {
 	localConflictDatabase: string;
 	syncFolderMode: SyncFolderMode;
 	customSyncFolder: string;
+	syncObsidianConfig: boolean;
 	couchDbUrl: string;
 	couchDbDatabase: string;
 	couchDbUsername: string;
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	localConflictDatabase: "",
 	syncFolderMode: "vault-root",
 	customSyncFolder: "",
+	syncObsidianConfig: true,
 	couchDbUrl: "",
 	couchDbDatabase: "mysync",
 	couchDbUsername: "",
@@ -112,8 +114,16 @@ export class MySyncSettingTab extends PluginSettingTab {
 						}
 					},
 					{
+						name: "Sync Obsidian configuration",
+						desc: "Synchronize top-level Obsidian configuration files (app.json, hotkeys.json, workspace.json).",
+						control: {
+							type: "toggle",
+							key: "syncObsidianConfig"
+						}
+					},
+					{
 						name: "Obsidian configuration folder",
-						desc: "Top-level files in this folder are included in synchronization.",
+						desc: "Top-level files in this folder are included in synchronization when enabled.",
 						render: (setting) => {
 							setting.addText((text) => {
 								text.inputEl.readOnly = true;
@@ -252,6 +262,9 @@ export class MySyncSettingTab extends PluginSettingTab {
 			case "customSyncFolder":
 				this.plugin.settings.customSyncFolder = String(value).trim();
 				break;
+			case "syncObsidianConfig":
+				this.plugin.settings.syncObsidianConfig = Boolean(value);
+				break;
 			case "couchDbUrl":
 				this.plugin.settings.couchDbUrl = String(value).trim().replace(/\/+$/g, "");
 				break;
@@ -364,8 +377,20 @@ export class MySyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(localSectionEl)
+			.setName("Sync Obsidian configuration")
+			.setDesc("Synchronize top-level Obsidian configuration files (app.json, hotkeys.json, workspace.json).")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncObsidianConfig)
+					.onChange(async (value) => {
+						this.plugin.settings.syncObsidianConfig = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(localSectionEl)
 			.setName("Obsidian configuration folder")
-			.setDesc("Top-level files in this folder are included in synchronization.")
+			.setDesc("Top-level files in this folder are included in synchronization when enabled.")
 			.addText((text) => {
 				text.inputEl.readOnly = true;
 				text.inputEl.addClass("mysync-readonly-setting");

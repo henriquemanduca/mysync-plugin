@@ -413,6 +413,10 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 		settings.syncFolderMode = data.syncFolderMode;
 	}
 
+	if (typeof data.syncObsidianConfig === "boolean") {
+		settings.syncObsidianConfig = data.syncObsidianConfig;
+	}
+
 	if (isLoggerLevel(data.logLevel)) {
 		settings.logLevel = data.logLevel;
 	}
