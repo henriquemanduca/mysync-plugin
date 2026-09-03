@@ -1,4 +1,5 @@
 import { requestUrl } from "obsidian";
+import { XMLParser } from "fast-xml-parser";
 import type { VaultFileRecord } from "./types";
 import { validateNextcloudFilePath } from "./nextcloud-path";
 import { Logger } from "../utils/logger";
@@ -30,12 +31,167 @@ export interface NextcloudPushProgress {
 export interface NextcloudPushPlan {
 	records: VaultFileRecord[];
 	deletedPaths: string[];
+	preconditions?: Record<string, NextcloudWritePrecondition>;
+}
+
+export interface NextcloudWritePrecondition {
+	ifMatch?: string;
+	ifNoneMatch?: "*";
+}
+
+export interface NextcloudRemoteFile {
+	path: string;
+	etag: string;
+	lastModified?: string;
+	size: number;
+	contentType?: string;
+}
+
+export interface NextcloudDownload extends NextcloudRemoteFile {
+	content: ArrayBuffer;
+}
+
+export class NextcloudHttpError extends Error {
+	constructor(message: string, public readonly status: number) {
+		super(message);
+		this.name = "NextcloudHttpError";
+	}
 }
 
 type NextcloudDeleteStatus = "deleted" | "missing";
 type NextcloudDirectoryState = "empty" | "not-empty" | "missing" | "unknown";
 
 export class NextcloudService {
+	async listFiles(conn: NextcloudConnection): Promise<NextcloudRemoteFile[]> {
+		const rootUrl = this.buildWebDavUrl(conn, "");
+		const rootSegments = decodeUrlSegments(new URL(rootUrl).pathname);
+		const pendingDirectories = [""];
+		const visitedDirectories = new Set<string>();
+		const files = new Map<string, NextcloudRemoteFile>();
+
+		while (pendingDirectories.length > 0) {
+			const directoryPath = pendingDirectories.shift()!;
+			if (visitedDirectories.has(directoryPath)) {
+				throw new Error(`Nextcloud listing contains a duplicate directory: ${directoryPath || "/"}`);
+			}
+			visitedDirectories.add(directoryPath);
+
+			const url = this.buildWebDavUrl(conn, directoryPath ? `${directoryPath}/` : "");
+			const result = await this.request({
+				url,
+				method: "PROPFIND",
+				headers: {
+					...this.buildAuthHeaders(conn),
+					Depth: "1",
+					"Content-Type": "application/xml; charset=utf-8"
+				},
+				body: PROPFIND_BODY
+			}, "Nextcloud directory listing");
+			const responses = parseMultiStatus(result.text);
+			if (responses.length === 0) {
+				throw new Error(`Nextcloud returned an empty or incomplete listing for ${directoryPath || "/"}.`);
+			}
+
+			let foundSelf = false;
+			for (const response of responses) {
+				const relativePath = getSafeRelativeHrefPath(response.href, url, rootSegments);
+				const normalizedDirectory = directoryPath.replace(/\/+$/g, "");
+				if (relativePath === normalizedDirectory) {
+					foundSelf = true;
+					if (!response.isCollection) {
+						throw new Error(`Nextcloud remote folder is not a directory: ${directoryPath || "/"}`);
+					}
+					continue;
+				}
+
+				const parent = getParentPath(relativePath);
+				if (parent !== normalizedDirectory) {
+					throw new Error(`Nextcloud returned an entry outside the requested directory: ${relativePath}`);
+				}
+				const validation = validateNextcloudFilePath(relativePath);
+				if (!validation.valid) {
+					throw new Error(`Nextcloud returned an invalid path (${relativePath}): ${validation.reasons.join(", ")}`);
+				}
+
+				if (response.isCollection) {
+					pendingDirectories.push(relativePath);
+					continue;
+				}
+
+				if (!response.etag) {
+					throw new Error(`Nextcloud did not return an ETag for ${relativePath}.`);
+				}
+				if (files.has(relativePath)) {
+					throw new Error(`Nextcloud listing contains a duplicate path: ${relativePath}`);
+				}
+				files.set(relativePath, {
+					path: relativePath,
+					etag: response.etag,
+					lastModified: response.lastModified,
+					size: response.size,
+					contentType: response.contentType
+				});
+			}
+
+			if (!foundSelf) {
+				throw new Error(`Nextcloud listing is incomplete for ${directoryPath || "/"}.`);
+			}
+		}
+
+		return Array.from(files.values()).sort((left, right) => left.path.localeCompare(right.path));
+	}
+
+	async getFileMetadata(conn: NextcloudConnection, path: string): Promise<NextcloudRemoteFile> {
+		assertValidFilePath(path);
+		const url = this.buildWebDavUrl(conn, path);
+		const result = await this.request({
+			url,
+			method: "PROPFIND",
+			headers: {
+				...this.buildAuthHeaders(conn),
+				Depth: "0",
+				"Content-Type": "application/xml; charset=utf-8"
+			},
+			body: PROPFIND_BODY
+		}, "Nextcloud metadata request");
+		const responses = parseMultiStatus(result.text);
+		if (responses.length !== 1 || responses[0]?.isCollection || !responses[0]?.etag) {
+			throw new Error(`Nextcloud returned incomplete metadata for ${path}.`);
+		}
+		const item = responses[0]!;
+		return {
+			path,
+			etag: item.etag!,
+			lastModified: item.lastModified,
+			size: item.size,
+			contentType: item.contentType
+		};
+	}
+
+	async downloadFile(
+		conn: NextcloudConnection,
+		path: string,
+		expectedEtag: string
+	): Promise<NextcloudDownload> {
+		assertValidFilePath(path);
+		const result = await this.request({
+			url: this.buildWebDavUrl(conn, path),
+			method: "GET",
+			headers: {
+				...this.buildAuthHeaders(conn),
+				"If-Match": expectedEtag
+			}
+		}, "Nextcloud download");
+		const etag = getResponseHeader(result.headers, "etag") ?? expectedEtag;
+		return {
+			path,
+			etag,
+			lastModified: getResponseHeader(result.headers, "last-modified"),
+			size: result.arrayBuffer.byteLength,
+			contentType: getResponseHeader(result.headers, "content-type"),
+			content: result.arrayBuffer
+		};
+	}
 	/**
 	 * Tests the connection to the Nextcloud server via PROPFIND Depth:0.
 	 * Throws if the connection fails.
@@ -66,6 +222,8 @@ export class NextcloudService {
 		conn: NextcloudConnection,
 		dirPath: string
 	): Promise<void> {
+		assertValidRemotePath(conn.remotePath);
+		if (dirPath) assertValidFilePath(dirPath);
 		const remotePath = conn.remotePath.replace(/^\/+|\/+$/g, "");
 		const relativePath = dirPath.replace(/^\/+|\/+$/g, "");
 
@@ -129,8 +287,10 @@ export class NextcloudService {
 		conn: NextcloudConnection,
 		vaultFilePath: string,
 		content: ArrayBuffer | string,
-		contentType: string
-	): Promise<void> {
+		contentType: string,
+		precondition: NextcloudWritePrecondition = {}
+	): Promise<NextcloudRemoteFile> {
+		assertValidFilePath(vaultFilePath);
 		const lastSlash = vaultFilePath.lastIndexOf("/");
 		const parentDir = lastSlash !== -1 ? vaultFilePath.substring(0, lastSlash) : "";
 
@@ -141,21 +301,28 @@ export class NextcloudService {
 			? new TextEncoder().encode(content).buffer
 			: content;
 
-		const result = await requestUrl({
+		const result = await this.request({
 			url,
 			method: "PUT",
 			headers: {
 				...this.buildAuthHeaders(conn),
-				"Content-Type": contentType
+				"Content-Type": contentType,
+				...buildConditionalHeaders(precondition)
 			},
 			body
-		});
-
-		if (result.status < 200 || result.status >= 300) {
-			throw new Error(`Nextcloud upload failed: HTTP ${result.status}`);
-		}
+		}, "Nextcloud upload");
 
 		logger.debug("Uploaded file to Nextcloud", { path: vaultFilePath });
+		const etag = getResponseHeader(result.headers, "etag");
+		return etag
+			? {
+				path: vaultFilePath,
+				etag,
+				lastModified: getResponseHeader(result.headers, "last-modified"),
+				size: body.byteLength,
+				contentType
+			}
+			: this.getFileMetadata(conn, vaultFilePath);
 	}
 
 	/**
@@ -164,9 +331,11 @@ export class NextcloudService {
 	 */
 	async deleteFile(
 		conn: NextcloudConnection,
-		remotePath: string
+		remotePath: string,
+		precondition: NextcloudWritePrecondition = {}
 	): Promise<NextcloudDeleteStatus> {
-		const status = await this.deletePath(conn, remotePath);
+		assertValidFilePath(remotePath);
+		const status = await this.deletePath(conn, remotePath, precondition);
 
 		logger.debug(
 			status === "deleted"
@@ -221,7 +390,7 @@ export class NextcloudService {
 			try {
 				const { content, contentType } = await extracted.resolve();
 
-				await this.uploadFile(conn, record.path, content, contentType);
+				await this.uploadFile(conn, record.path, content, contentType, plan.preconditions?.[record.path]);
 				uploaded++;
 			} catch (error) {
 				logger.error("Failed to upload file to Nextcloud", error, {
@@ -253,7 +422,7 @@ export class NextcloudService {
 			}
 
 			try {
-				await this.deleteFile(conn, path);
+				await this.deleteFile(conn, path, plan.preconditions?.[path]);
 				deleted += 1;
 			} catch (error) {
 				logger.error("Failed to delete file from Nextcloud", error, { path });
@@ -365,28 +534,24 @@ export class NextcloudService {
 
 	private async deletePath(
 		conn: NextcloudConnection,
-		path: string
+		path: string,
+		precondition: NextcloudWritePrecondition = {}
 	): Promise<NextcloudDeleteStatus> {
 		const url = this.buildWebDavUrl(conn, path);
 
 		try {
-			const result = await requestUrl({
+			const result = await this.request({
 				url,
 				method: "DELETE",
-				headers: this.buildAuthHeaders(conn)
-			});
-
-			if (result.status === 404) {
-				return "missing";
-			}
-
-			if (result.status < 200 || result.status >= 300) {
-				throw new Error(`Nextcloud deletion failed: HTTP ${result.status}`);
-			}
+				headers: {
+					...this.buildAuthHeaders(conn),
+					...buildConditionalHeaders(precondition)
+				}
+			}, "Nextcloud deletion");
 
 			return "deleted";
 		} catch (error) {
-			if (getHttpStatus(error) === 404) {
+			if ((error instanceof NextcloudHttpError && error.status === 404) || getHttpStatus(error) === 404) {
 				return "missing";
 			}
 
@@ -399,6 +564,8 @@ export class NextcloudService {
 	 * Example: https://cloud.example.com/remote.php/webdav/Notes/subfolder/file.md
 	 */
 	private buildWebDavUrl(conn: NextcloudConnection, path: string): string {
+		assertValidRemotePath(conn.remotePath);
+		if (path.replace(/^\/+|\/+$/g, "")) assertValidFilePath(path.replace(/^\/+|\/+$/g, ""));
 		const base = conn.url.replace(/\/+$/, "");
 		const remotePath = conn.remotePath.replace(/^\/+|\/+$/g, "");
 		const filePath = path.replace(/^\/+/, "");
@@ -425,6 +592,31 @@ export class NextcloudService {
 		return {
 			"Authorization": `Basic ${token}`
 		};
+	}
+
+	private async request(
+		options: {
+			url: string;
+			method?: string;
+			headers?: Record<string, string>;
+			body?: string | ArrayBuffer;
+		},
+		operation: string
+	): Promise<Awaited<ReturnType<typeof requestUrl>>> {
+		try {
+			const result = await requestUrl({ ...options, throw: false });
+			if (result.status < 200 || result.status >= 300) {
+				throw new NextcloudHttpError(`${operation} failed: HTTP ${result.status}`, result.status);
+			}
+			return result;
+		} catch (error) {
+			if (error instanceof NextcloudHttpError) throw error;
+			const status = getHttpStatus(error);
+			if (status !== null) {
+				throw new NextcloudHttpError(`${operation} failed: HTTP ${status}`, status);
+			}
+			throw error;
+		}
 	}
 }
 
@@ -479,28 +671,138 @@ function getParentPath(path: string) {
 }
 
 function extractWebDavHrefs(xml: string) {
-	const hrefs: string[] = [];
-	const pattern = /<(?:[\w-]+:)?href\b[^>]*>([\s\S]*?)<\/(?:[\w-]+:)?href>/gi;
-	let match: RegExpExecArray | null;
-
-	while ((match = pattern.exec(xml)) !== null) {
-		const href = match[1]?.trim();
-
-		if (href) {
-			hrefs.push(decodeXmlEntities(href));
-		}
+	try {
+		const parsed = new XMLParser({ removeNSPrefix: true, parseTagValue: false }).parse(xml);
+		const responses = toArray(asRecord(asRecord(parsed)?.multistatus)?.response);
+		return responses.flatMap((raw) => {
+			const href = asString(asRecord(raw)?.href)?.trim();
+			return href ? [href] : [];
+		});
+	} catch {
+		return [];
 	}
-
-	return hrefs;
 }
 
-function decodeXmlEntities(value: string) {
-	return value
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, "\"")
-		.replace(/&#39;|&apos;/g, "'");
+const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
+<d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:getlastmodified/><d:getcontentlength/><d:getcontenttype/><d:resourcetype/></d:prop></d:propfind>`;
+
+interface ParsedWebDavResponse {
+	href: string;
+	isCollection: boolean;
+	etag?: string;
+	lastModified?: string;
+	size: number;
+	contentType?: string;
+}
+
+function parseMultiStatus(xml: string): ParsedWebDavResponse[] {
+	let parsed: unknown;
+	try {
+		parsed = new XMLParser({
+			removeNSPrefix: true,
+			ignoreAttributes: false,
+			parseTagValue: false,
+			trimValues: true
+		}).parse(xml);
+		} catch (error) {
+			throw new Error(`Nextcloud returned malformed WebDAV XML: ${String(error)}`);
+	}
+	const root = asRecord(parsed)?.multistatus;
+	const responses = toArray(asRecord(root)?.response);
+	if (!asRecord(root) || responses.length === 0) return [];
+
+	return responses.map((raw) => {
+		const response = asRecord(raw);
+		const href = asString(response?.href);
+		if (!href) throw new Error("Nextcloud WebDAV response is missing href.");
+		const successful = toArray(response?.propstat).map(asRecord).find((propstat) => {
+			const status = asString(propstat?.status);
+			return !status || /\s2\d\d\s/.test(` ${status} `);
+		});
+		const prop = asRecord(successful?.prop);
+		if (!prop) throw new Error(`Nextcloud WebDAV response is missing successful properties for ${href}.`);
+		const resourceType = asRecord(prop.resourcetype);
+		const sizeValue = Number(asString(prop.getcontentlength) ?? "0");
+		if (!Number.isFinite(sizeValue) || sizeValue < 0) {
+			throw new Error(`Nextcloud returned an invalid content length for ${href}.`);
+		}
+		return {
+			href,
+			isCollection: resourceType !== null && Object.prototype.hasOwnProperty.call(resourceType, "collection"),
+			etag: asString(prop.getetag),
+			lastModified: asString(prop.getlastmodified),
+			size: sizeValue,
+			contentType: asString(prop.getcontenttype)
+		};
+	});
+}
+
+function getSafeRelativeHrefPath(href: string, baseUrl: string, rootSegments: string[]) {
+	let url: URL;
+	try {
+		url = new URL(href, baseUrl);
+	} catch (error) {
+		throw new Error(`Nextcloud returned an invalid href (${href}): ${String(error)}`);
+	}
+	const base = new URL(baseUrl);
+	if (url.origin !== base.origin) throw new Error(`Nextcloud returned an external href: ${href}`);
+	const segments = decodeUrlSegments(url.pathname);
+	if (segments.length < rootSegments.length || rootSegments.some((part, index) => segments[index] !== part)) {
+		throw new Error(`Nextcloud returned a path outside the remote folder: ${href}`);
+	}
+	const relative = segments.slice(rootSegments.length);
+	if (relative.some((segment) => segment === "" || segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\"))) {
+		throw new Error(`Nextcloud returned an unsafe path: ${href}`);
+	}
+	return relative.join("/");
+}
+
+function decodeUrlSegments(pathname: string) {
+	return pathname.replace(/^\/+|\/+$/g, "").split("/").filter(Boolean).map((segment) => {
+		try {
+			return decodeURIComponent(segment);
+		} catch (error) {
+			throw new Error(`Nextcloud returned a malformed encoded path (${pathname}): ${String(error)}`);
+		}
+	});
+}
+
+function buildConditionalHeaders(condition: NextcloudWritePrecondition) {
+	return {
+		...(condition.ifMatch ? { "If-Match": condition.ifMatch } : {}),
+		...(condition.ifNoneMatch ? { "If-None-Match": condition.ifNoneMatch } : {})
+	};
+}
+
+function assertValidFilePath(path: string) {
+	const normalized = path.replace(/\/+$/g, "");
+	const validation = validateNextcloudFilePath(normalized);
+	if (!validation.valid) {
+		throw new Error(`Invalid Nextcloud path (${path}): ${validation.reasons.join(", ")}`);
+	}
+}
+
+function assertValidRemotePath(path: string) {
+	const normalized = path.replace(/^\/+|\/+$/g, "");
+	if (normalized) assertValidFilePath(normalized);
+}
+
+function getResponseHeader(headers: Record<string, string> | undefined, name: string) {
+	if (!headers) return undefined;
+	const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+	return entry?.[1];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+	return value !== null && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function asString(value: unknown) {
+	return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
+}
+
+function toArray(value: unknown): unknown[] {
+	return Array.isArray(value) ? value : value === undefined ? [] : [value];
 }
 
 function normalizeUrlPath(value: string, base?: string) {

@@ -4,6 +4,7 @@ import type { MySyncSettings } from "../../src/settings";
 import type { PouchDbConflictStore } from "../../src/sync/conflict-store";
 import type { PouchDbFileStore } from "../../src/sync/pouchdb-store";
 import { SyncService, type SyncStatus } from "../../src/sync/sync-service";
+import { NextcloudHttpError } from "../../src/sync/nextcloud-service";
 import type { VaultFileRecord } from "../../src/sync/types";
 import { Logger } from "../../src/utils/logger";
 import { Notice, TAbstractFile, TFile, TFolder } from "../mocks/obsidian";
@@ -34,7 +35,10 @@ function configRecord(path: string): VaultFileRecord {
 	};
 }
 
-function createFixture(configDir = ".obsidian") {
+function createFixture(
+	configDir = ".obsidian",
+	confirmNextcloudDeletions = vi.fn().mockResolvedValue(false)
+) {
 	const root = new TFolder("/");
 	const adapter = {
 		list: vi.fn().mockResolvedValue({ files: [], folders: [] }),
@@ -47,9 +51,14 @@ function createFixture(configDir = ".obsidian") {
 	const vault = {
 		adapter,
 		cachedRead: vi.fn(),
+		create: vi.fn().mockResolvedValue(undefined),
+		createBinary: vi.fn().mockResolvedValue(undefined),
 		configDir,
 		getAbstractFileByPath: vi.fn().mockReturnValue(null),
-		getRoot: vi.fn().mockReturnValue(root)
+		getRoot: vi.fn().mockReturnValue(root),
+		modify: vi.fn().mockResolvedValue(undefined),
+		modifyBinary: vi.fn().mockResolvedValue(undefined),
+		readBinary: vi.fn()
 	};
 	const fileManager = {
 		trashFile: vi.fn()
@@ -63,6 +72,7 @@ function createFixture(configDir = ".obsidian") {
 		deleteFileRecordsByPathPrefix: vi.fn().mockResolvedValue(undefined),
 		getFileRecordWithAttachments: vi.fn().mockResolvedValue(null),
 		getNextcloudPushCheckpoint: vi.fn().mockResolvedValue(null),
+		getNextcloudSyncState: vi.fn().mockResolvedValue(null),
 		listAllFileRecordIds: vi.fn().mockResolvedValue([]),
 		listFileChangesSince: vi.fn().mockResolvedValue({ changes: [], lastSequence: 0 }),
 		listFileRecords: vi.fn().mockResolvedValue([]),
@@ -72,6 +82,8 @@ function createFixture(configDir = ".obsidian") {
 		pullFromCouchDb: vi.fn().mockResolvedValue({ docsRead: 0 }),
 		resolveFileRecordAsDeleted: vi.fn().mockResolvedValue(undefined),
 		saveNextcloudPushCheckpoint: vi.fn().mockResolvedValue(undefined),
+		saveNextcloudSyncState: vi.fn().mockResolvedValue(undefined),
+		deleteFileRecordByPath: vi.fn().mockResolvedValue(undefined),
 		saveFileRecordIfChanged: vi.fn().mockResolvedValue(true)
 	};
 	const conflictStore = {
@@ -110,12 +122,14 @@ function createFixture(configDir = ".obsidian") {
 		() => settings,
 		(status) => statuses.push(status),
 		onOperationCompleted,
-		vi.fn()
+		vi.fn(),
+		confirmNextcloudDeletions
 	);
 
 	return {
 		adapter,
 		conflictStore,
+		confirmNextcloudDeletions,
 		fileManager,
 		onOperationCompleted,
 		root,
@@ -477,6 +491,87 @@ describe("SyncService configuration synchronization", () => {
 	});
 });
 
+describe("SyncService Nextcloud pull", () => {
+	beforeEach(() => Logger.setLevel("off"));
+	afterEach(() => Logger.setLevel("debug"));
+
+	it("routes the generic pull to Nextcloud and safely restores a new remote file", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		fixture.settings.nextcloudRemotePath = "/Notes";
+		const content = arrayBuffer("hello");
+		const remote = {
+			path: "note.md",
+			etag: "\"one\"",
+			lastModified: "Wed, 02 Sep 2026 12:00:00 GMT",
+			size: 5,
+			contentType: "text/markdown"
+		};
+		const listFiles = vi.fn().mockResolvedValue([remote]);
+		const downloadFile = vi.fn().mockResolvedValue({ ...remote, content });
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles,
+			downloadFile
+		};
+
+		await fixture.service.pullFromRemote();
+
+		expect(fixture.store.pullFromCouchDb).not.toHaveBeenCalled();
+		expect(downloadFile).toHaveBeenCalledWith(expect.any(Object), "note.md", "\"one\"");
+		expect(fixture.vault.create).toHaveBeenCalledWith("note.md", "hello");
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(expect.objectContaining({
+			path: "note.md",
+			contentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+		}));
+		expect(fixture.store.saveNextcloudSyncState).toHaveBeenLastCalledWith(expect.objectContaining({
+			lastCompletedAt: expect.any(String),
+			entries: { "note.md": expect.objectContaining({ etag: "\"one\"" }) }
+		}));
+		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePull");
+	});
+
+	it("cancels the whole pull at the 10-file and 25-percent deletion boundary", async () => {
+		const confirm = vi.fn().mockResolvedValue(false);
+		const fixture = createFixture(".obsidian", confirm);
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const files = Array.from({ length: 40 }, (_, index) => new TFile(`note-${index}.md`, 5, 100));
+		configureVaultTree(fixture, new TFolder("/", files));
+		fixture.vault.cachedRead.mockResolvedValue("hello");
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "old-target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: Object.fromEntries(files.map((file) => [file.path, {
+				path: file.path,
+				etag: `\"${file.path}\"`,
+				size: 5,
+				syncedContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+			}]))
+		});
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles: vi.fn().mockResolvedValue(files.slice(10).map((file) => ({
+				path: file.path,
+				etag: `\"${file.path}\"`,
+				size: 5,
+				contentType: "text/markdown"
+			})))
+		};
+
+		await fixture.service.pullFromRemote();
+
+		expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ count: 10, percentage: 25 }));
+		expect(fixture.fileManager.trashFile).not.toHaveBeenCalled();
+		expect(fixture.store.saveNextcloudSyncState).not.toHaveBeenCalled();
+		expect(fixture.onOperationCompleted).not.toHaveBeenCalledWith("remotePull");
+	});
+});
+
 describe("SyncService remote deletion cleanup", () => {
 	beforeEach(() => {
 		Logger.setLevel("off");
@@ -680,6 +775,89 @@ describe("SyncService Nextcloud push", () => {
 		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePush");
 		expect(Notice.instances.at(-1)?.message)
 			.toBe("Nextcloud: uploaded 1, deleted 1, skipped 0.");
+	});
+
+	it("uses the snapshot ETag for a conditional upload and updates it after success", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const record = markdownRecord("note.md");
+		fixture.store.listFileRecords.mockResolvedValue([record]);
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: {
+				"note.md": {
+					path: "note.md",
+					etag: "\"old\"",
+					size: 3,
+					syncedContentHash: "old-hash"
+				}
+			}
+		});
+		const uploadFile = vi.fn().mockResolvedValue({
+			path: "note.md",
+			etag: "\"new\"",
+			size: 5,
+			contentType: "text/markdown"
+		});
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles: vi.fn(),
+			uploadFile,
+			deleteFile: vi.fn()
+		};
+
+		await fixture.service.pushToRemote();
+
+		expect(uploadFile).toHaveBeenCalledWith(
+			expect.any(Object),
+			"note.md",
+			"hello",
+			"text/markdown; charset=utf-8",
+			{ ifMatch: "\"old\"" }
+		);
+		expect(fixture.store.saveNextcloudSyncState).toHaveBeenCalledWith(expect.objectContaining({
+			entries: { "note.md": expect.objectContaining({ etag: "\"new\"" }) }
+		}));
+	});
+
+	it("turns a conditional upload failure into a persistent Nextcloud conflict", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const record = markdownRecord("note.md");
+		fixture.store.listFileRecords.mockResolvedValue([record]);
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: {
+				"note.md": { path: "note.md", etag: "\"old\"", size: 3, syncedContentHash: "old-hash" }
+			}
+		});
+		const metadata = { path: "note.md", etag: "\"remote\"", size: 6, contentType: "text/markdown" };
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles: vi.fn(),
+			uploadFile: vi.fn().mockRejectedValue(new NextcloudHttpError("HTTP 412", 412)),
+			getFileMetadata: vi.fn().mockResolvedValue(metadata),
+			downloadFile: vi.fn().mockResolvedValue({ ...metadata, content: arrayBuffer("remote") }),
+			deleteFile: vi.fn()
+		};
+
+		await fixture.service.pushToRemote();
+
+		expect(fixture.conflictStore.upsertConflict).toHaveBeenCalledWith(expect.objectContaining({
+			backend: "nextcloud",
+			path: "note.md",
+			kind: "edit-edit",
+			targetKey: expect.not.stringContaining("app-password")
+		}));
+		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalled();
 	});
 
 	it("pushes only changes after the checkpoint during a pending push", async () => {

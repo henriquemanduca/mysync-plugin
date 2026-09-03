@@ -1,5 +1,11 @@
 import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
-import { NextcloudService, type NextcloudConnection } from "./nextcloud-service";
+import {
+	NextcloudHttpError,
+	NextcloudService,
+	type NextcloudConnection,
+	type NextcloudDownload,
+	type NextcloudRemoteFile
+} from "./nextcloud-service";
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
@@ -9,6 +15,9 @@ import type {
 import type { PouchDbConflictStore } from "./conflict-store";
 import type {
 	ConflictResolutionStrategy,
+	NextcloudSyncConflict,
+	NextcloudSyncState,
+	NextcloudSyncStateEntry,
 	SyncConflict,
 	SyncConflictKind,
 	SyncConflictLocalVariant,
@@ -19,6 +28,7 @@ import {
 	createAdapterFileContentHash,
 	createBinaryContentHash,
 	createFileRecord,
+	createFileRecordFromContent,
 	createFileRecordId,
 	createLocalFileContentHash,
 	createObsidianConfigFileRecord,
@@ -30,6 +40,7 @@ import {
 	isSyncBlacklistedPath,
 	isObsidianConfigFilePath,
 	isSyncableVaultFile,
+	isSupportedSyncFilePath,
 	isPathInsideSyncFolder,
 	listObsidianConfigFilePaths,
 	getAttachmentArrayBuffer,
@@ -96,6 +107,12 @@ export type CompletedSyncOperation =
 	| "remotePull"
 	| "resetLocalDatabases";
 
+export interface NextcloudDeletionConfirmation {
+	target: string;
+	count: number;
+	percentage: number;
+}
+
 const logger = new Logger("SyncService");
 const SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES = new Set([
 	"app.json",
@@ -140,7 +157,10 @@ export class SyncService {
 		private getSettings: () => MySyncSettings,
 		private onStatusChange: (status: SyncStatus) => void,
 		private onOperationCompleted: (operation: CompletedSyncOperation) => Promise<void>,
-		private onConflictsChanged: (conflicts: SyncConflict[]) => void
+		private onConflictsChanged: (conflicts: SyncConflict[]) => void,
+		private confirmNextcloudDeletions: (
+			details: NextcloudDeletionConfirmation
+		) => Promise<boolean> = async () => false
 	) {
 		this.onStatusChange({ state: "idle" });
 	}
@@ -185,6 +205,14 @@ export class SyncService {
 		if (this.isRunning()) return;
 
 		const settings = this.getSettings();
+		const initialConflict = await this.conflictStore.getConflict(conflictId);
+		if (!initialConflict || initialConflict.status === "resolved") {
+			new Notice("Conflict is no longer available.");
+			return;
+		}
+		if (initialConflict.backend === "nextcloud") {
+			return this.resolveNextcloudConflict(initialConflict, strategy);
+		}
 		const validationMessage = validateCouchDbSettings(settings, "resolving conflicts");
 
 		if (validationMessage) {
@@ -198,7 +226,7 @@ export class SyncService {
 		try {
 			const conflict = await this.conflictStore.getConflict(conflictId);
 
-			if (!conflict || conflict.status === "resolved") {
+			if (!conflict || conflict.status === "resolved" || conflict.backend === "nextcloud") {
 				throw new Error("Conflict is no longer available.");
 			}
 
@@ -281,6 +309,13 @@ export class SyncService {
 		if (this.isRunning()) return;
 
 		const conflict = await this.conflictStore.getConflict(conflictId);
+		if (conflict?.backend === "nextcloud") {
+			if (!conflict.resolution || conflict.status !== "pending-push") {
+				new Notice("This conflict has no resolution waiting to be pushed.");
+				return;
+			}
+			return this.resolveNextcloudConflict(conflict, conflict.resolution.strategy);
+		}
 
 		if (!conflict?.resolution || conflict.status !== "pending-push") {
 			new Notice("This conflict has no resolution waiting to be pushed.");
@@ -322,7 +357,7 @@ export class SyncService {
 	}
 
 	private async applyConflictResolution(
-		conflict: SyncConflict,
+		conflict: Exclude<SyncConflict, { backend: "nextcloud" }>,
 		strategy: ConflictResolutionStrategy,
 		selectedRevision?: string
 	) {
@@ -402,6 +437,262 @@ export class SyncService {
 		} finally {
 			this.applyingRemoteChange = false;
 		}
+	}
+
+	private async resolveNextcloudConflict(
+		conflict: NextcloudSyncConflict,
+		strategy: ConflictResolutionStrategy
+	) {
+		const settings = this.getSettings();
+		const validationMessage = validateNextcloudSettings(settings, "resolving conflicts");
+		if (validationMessage) {
+			new Notice(validationMessage);
+			return;
+		}
+		this.syncInProgress = true;
+		try {
+			const connection = createNextcloudConnection(settings);
+			const targetKey = createNextcloudTargetKey(
+				connection,
+				this.getCurrentSyncFolder(),
+				this.isObsidianConfigSyncEnabled()
+			);
+			if (targetKey !== conflict.targetKey) {
+				throw new Error("The active Nextcloud target differs from this conflict. Restore the original settings and pull again.");
+			}
+			await this.conflictStore.updateConflict(conflict._id, (current) => ({
+				...current,
+				status: "resolving",
+				error: undefined
+			}));
+
+			const local = await this.createLocalRecord(conflict.path);
+			const currentLocalHash = local?.contentHash;
+			const localMatches = conflict.localVariant.exists
+				? currentLocalHash === conflict.observedLocalContentHash
+				: !local && !(await this.localPathExists(conflict.path));
+			const remote = await this.getNextcloudMetadataIfExists(connection, conflict.path);
+			const remoteMatches = conflict.remote.exists
+				? remote?.etag === conflict.remote.etag
+				: !remote;
+
+			if (!localMatches || !remoteMatches) {
+				if (await this.tryCompleteNextcloudPendingOperation(conflict, connection, remote)) {
+					await this.refreshActiveConflicts();
+					new Notice(`Resolved conflict for ${conflict.path}.`);
+					return;
+				}
+				await this.conflictStore.updateConflict(conflict._id, (current) => ({
+					...current,
+					status: "stale",
+					error: "The local file or remote ETag changed. Pull again before resolving this conflict."
+				}));
+				throw new Error("The conflict changed. Pull again to refresh it.");
+			}
+
+			const resolvedAt = new Date().toISOString();
+			await this.conflictStore.updateConflict(conflict._id, (current) => ({
+				...current,
+				resolution: {
+					strategy,
+					resolvedDocumentIds: [conflict.recordId],
+					resolvedAt,
+					...(current.backend === "nextcloud" && current.resolution?.strategy === strategy && current.resolution.copyPath
+						? { copyPath: current.resolution.copyPath }
+						: {})
+				},
+				error: undefined
+			}));
+			await this.applyNextcloudConflictResolution(conflict, strategy, connection, local, remote);
+			await this.conflictStore.updateConflict(conflict._id, (current) => ({
+				...current,
+				status: "resolved",
+				pendingOperation: undefined,
+				error: undefined
+			}));
+			await this.refreshActiveConflicts();
+			new Notice(`Resolved conflict for ${conflict.path}.`);
+		} catch (error) {
+			logger.error("Nextcloud conflict resolution failed", error, { conflictId: conflict._id, strategy });
+			try {
+				await this.conflictStore.updateConflict(conflict._id, (current) => ({
+					...current,
+					status: current.status === "stale"
+						? "stale"
+						: current.backend === "nextcloud" && current.pendingOperation ? "pending-push" : "error",
+					error: getErrorMessage(error, "Nextcloud conflict resolution failed.")
+				}));
+			} catch (updateError) {
+				logger.error("Failed to persist Nextcloud conflict error", updateError);
+			}
+			await this.refreshActiveConflicts();
+			new Notice(getErrorMessage(error, "Nextcloud conflict resolution failed."));
+		} finally {
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+		}
+	}
+
+	private async applyNextcloudConflictResolution(
+		conflict: NextcloudSyncConflict,
+		strategy: ConflictResolutionStrategy,
+		connection: NextcloudConnection,
+		local: VaultFileRecord | null,
+		remote: NextcloudRemoteFile | undefined
+	) {
+		const state = await this.localStore.getNextcloudSyncState(conflict.targetKey) ?? {
+			type: "mysync-nextcloud-sync-state" as const,
+			targetKey: conflict.targetKey,
+			initializedAt: new Date().toISOString(),
+			entries: {}
+		};
+		this.applyingRemoteChange = true;
+		try {
+			if (strategy === "keep-local" || (strategy === "delete" && !local)) {
+				if (!local) {
+					if (remote) {
+						await this.setNextcloudPendingOperation(conflict._id, { action: "delete", path: conflict.path, ifMatch: remote.etag });
+						await this.nextcloudService.deleteFile(connection, conflict.path, { ifMatch: remote.etag });
+					}
+					delete state.entries[conflict.path];
+					await this.localStore.deleteFileRecordByPath(conflict.path);
+					await this.localStore.saveNextcloudSyncState(state);
+					return;
+				}
+				const upload = await getNextcloudUpload(local);
+				await this.setNextcloudPendingOperation(conflict._id, {
+					action: "upload",
+					path: conflict.path,
+					...(remote ? { ifMatch: remote.etag } : { ifNoneMatch: "*" as const }),
+					expectedContentHash: local.contentHash
+				});
+				const metadata = await this.nextcloudService.uploadFile(
+					connection,
+					conflict.path,
+					upload.content,
+					upload.contentType,
+					remote ? { ifMatch: remote.etag } : { ifNoneMatch: "*" }
+				);
+				state.entries[conflict.path] = toNextcloudStateEntry(metadata, local.contentHash);
+				await this.localStore.saveFileRecordIfChanged(local);
+				await this.localStore.saveNextcloudSyncState(state);
+				return;
+			}
+
+			if (strategy === "keep-remote" || strategy === "delete") {
+				if (!remote) {
+					await this.deleteLocalFile(conflict.path);
+					await this.localStore.deleteFileRecordByPath(conflict.path);
+					delete state.entries[conflict.path];
+					await this.localStore.saveNextcloudSyncState(state);
+					return;
+				}
+				const download = await this.nextcloudService.downloadFile(connection, conflict.path, remote.etag);
+				const record = await this.recordFromNextcloudDownload(download);
+				await this.writeRecordToVault(record, conflict.path);
+				await this.localStore.saveFileRecordIfChanged(record);
+				state.entries[conflict.path] = toNextcloudStateEntry(remote, record.contentHash);
+				await this.localStore.saveNextcloudSyncState(state);
+				return;
+			}
+
+			if (!local || !remote) throw new Error("Keep both requires both local and remote files.");
+			let copyPath = conflict.resolution?.strategy === "keep-both"
+				? conflict.resolution.copyPath
+				: undefined;
+			let copyRecord = copyPath ? await this.createLocalRecord(copyPath) : null;
+			if (!copyPath || !copyRecord) {
+				const download = await this.nextcloudService.downloadFile(connection, conflict.path, remote.etag);
+				const remoteRecord = await this.recordFromNextcloudDownload(download);
+				copyPath = await this.createConflictCopyPath(conflict.path);
+				copyRecord = { ...remoteRecord, _id: createFileRecordId(copyPath), path: copyPath, fileName: copyPath.slice(copyPath.lastIndexOf("/") + 1) };
+				await this.writeRecordToVault(copyRecord, copyPath);
+				await this.localStore.saveFileRecordIfChanged(copyRecord);
+				const persistedCopyPath = copyPath;
+				await this.conflictStore.updateConflict(conflict._id, (current) => current.backend === "nextcloud" && current.resolution
+					? { ...current, resolution: { ...current.resolution, copyPath: persistedCopyPath } }
+					: current);
+			}
+			const existingCopy = await this.getNextcloudMetadataIfExists(connection, copyPath);
+			let copyMetadata: NextcloudRemoteFile;
+			if (existingCopy) {
+				const matchingCopy = await this.remoteContentMatches(connection, copyPath, copyRecord.contentHash);
+				if (!matchingCopy) throw new Error(`The remote conflict copy path is already occupied: ${copyPath}`);
+				copyMetadata = matchingCopy;
+			} else {
+				const copyUpload = await getNextcloudUpload(copyRecord);
+				await this.setNextcloudPendingOperation(conflict._id, { action: "upload", path: copyPath, ifNoneMatch: "*", expectedContentHash: copyRecord.contentHash });
+				copyMetadata = await this.nextcloudService.uploadFile(connection, copyPath, copyUpload.content, copyUpload.contentType, { ifNoneMatch: "*" });
+			}
+			state.entries[copyPath] = toNextcloudStateEntry(copyMetadata, copyRecord.contentHash);
+			await this.localStore.saveNextcloudSyncState(state);
+
+			const localUpload = await getNextcloudUpload(local);
+			await this.setNextcloudPendingOperation(conflict._id, { action: "upload", path: conflict.path, ifMatch: remote.etag, expectedContentHash: local.contentHash });
+			const localMetadata = await this.nextcloudService.uploadFile(connection, conflict.path, localUpload.content, localUpload.contentType, { ifMatch: remote.etag });
+			state.entries[conflict.path] = toNextcloudStateEntry(localMetadata, local.contentHash);
+			await this.localStore.saveNextcloudSyncState(state);
+		} finally {
+			this.applyingRemoteChange = false;
+		}
+	}
+
+	private async setNextcloudPendingOperation(
+		conflictId: string,
+		operation: NonNullable<NextcloudSyncConflict["pendingOperation"]>
+	) {
+		await this.conflictStore.updateConflict(conflictId, (current) => current.backend === "nextcloud"
+			? { ...current, pendingOperation: operation }
+			: current);
+	}
+
+	private async getNextcloudMetadataIfExists(connection: NextcloudConnection, path: string) {
+		try {
+			return await this.nextcloudService.getFileMetadata(connection, path);
+		} catch (error) {
+			if (error instanceof NextcloudHttpError && error.status === 404) return undefined;
+			throw error;
+		}
+	}
+
+	private async tryCompleteNextcloudPendingOperation(
+		conflict: NextcloudSyncConflict,
+		connection: NextcloudConnection,
+		remote: NextcloudRemoteFile | undefined
+	) {
+		const pending = conflict.pendingOperation;
+		if (!pending) return false;
+		if (pending.action === "delete" && !remote) {
+			await this.finishAlreadyAppliedNextcloudOperation(conflict, undefined, undefined);
+			return true;
+		}
+		if (pending.action === "upload" && remote && pending.expectedContentHash) {
+			const download = await this.nextcloudService.downloadFile(connection, pending.path, remote.etag);
+			const record = await this.recordFromNextcloudDownload(download);
+			if (record.contentHash === pending.expectedContentHash) {
+				await this.finishAlreadyAppliedNextcloudOperation(conflict, remote, record.contentHash);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private async finishAlreadyAppliedNextcloudOperation(
+		conflict: NextcloudSyncConflict,
+		remote: NextcloudRemoteFile | undefined,
+		contentHash: string | undefined
+	) {
+		const state = await this.localStore.getNextcloudSyncState(conflict.targetKey);
+		if (state) {
+			if (remote && contentHash) state.entries[conflict.path] = toNextcloudStateEntry(remote, contentHash);
+			else delete state.entries[conflict.path];
+		}
+		await this.conflictStore.updateConflict(conflict._id, (current) => ({
+			...current,
+			status: "resolved",
+			pendingOperation: undefined,
+			error: undefined
+		}));
 	}
 
 	private async pushResolvedConflict(connection: CouchDbConnection, documentIds: string[]) {
@@ -622,6 +913,168 @@ export class SyncService {
 		return this.pushPendingFilesToCouchDb();
 	}
 
+	async pullFromRemote() {
+		return this.getSettings().remoteBackend === "nextcloud"
+			? this.pullFromNextcloud()
+			: this.pullFromCouchDb();
+	}
+
+	async pullFromNextcloud() {
+		if (this.isRunning()) return;
+		const settings = this.getSettings();
+		const validationMessage = validateNextcloudSettings(settings, "pulling");
+		if (validationMessage) {
+			this.onStatusChange({ state: "error", message: validationMessage });
+			new Notice(validationMessage);
+			return;
+		}
+
+		this.syncInProgress = true;
+		const notice = new Notice("Pulling from Nextcloud.", 0);
+		try {
+			await this.refreshLocalIndexBeforeNextcloudPull();
+			const connection = createNextcloudConnection(settings);
+			const targetKey = createNextcloudTargetKey(
+				connection,
+				this.getCurrentSyncFolder(),
+				this.isObsidianConfigSyncEnabled()
+			);
+			const previous = await this.localStore.getNextcloudSyncState(targetKey);
+			const remoteInventory = await this.nextcloudService.listFiles(connection);
+			const relevantRemote = remoteInventory.filter((file) => this.isSupportedNextcloudPath(file.path));
+			const skippedUnsupported = remoteInventory.length - relevantRemote.length;
+			const remoteByPath = new Map(relevantRemote.map((file) => [file.path, file]));
+			const allPaths = new Set([
+				...Object.keys(previous?.entries ?? {}),
+				...remoteByPath.keys()
+			]);
+			const stagedEntries: Record<string, NextcloudSyncStateEntry> = structuredClone(previous?.entries ?? {});
+			const writes: Array<{ record: VaultFileRecord; remote: NextcloudRemoteFile }> = [];
+			const deletions: string[] = [];
+			const conflicts: NextcloudSyncConflict[] = [];
+			let docsRead = 0;
+			let skipped = skippedUnsupported;
+
+			for (const path of Array.from(allPaths).sort()) {
+				const before = previous?.entries[path];
+				const remote = remoteByPath.get(path);
+				const local = await this.createLocalRecord(path);
+				const localPathCollision = !local && (
+					await this.localPathExists(path) || await this.hasRestorePathCollision(path)
+				);
+				const localHash = local?.contentHash;
+
+				if (!before) {
+					if (!remote) continue;
+					const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
+					docsRead += 1;
+					const record = await this.recordFromNextcloudDownload(download);
+					if (localPathCollision || (localHash && localHash !== record.contentHash)) {
+						conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, localPathCollision ? "path-collision" : "edit-edit"));
+					} else if (localHash === record.contentHash) {
+						stagedEntries[path] = toNextcloudStateEntry(remote, record.contentHash);
+						skipped += 1;
+					} else {
+						writes.push({ record, remote });
+					}
+					continue;
+				}
+
+				if (!remote) {
+					if (!local) {
+						delete stagedEntries[path];
+					} else if (localHash === before.syncedContentHash) {
+						deletions.push(path);
+					} else {
+						conflicts.push(this.createNextcloudConflict(targetKey, path, local, undefined, undefined, "local-edit-remote-delete"));
+					}
+					continue;
+				}
+
+				const remoteChanged = remote.etag !== before.etag;
+				const localChanged = localHash !== before.syncedContentHash;
+				if (!remoteChanged) {
+					skipped += 1;
+					continue;
+				}
+
+				const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
+				docsRead += 1;
+				const record = await this.recordFromNextcloudDownload(download);
+				if (!local) {
+					conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, localPathCollision ? "path-collision" : "local-delete-remote-edit"));
+				} else if (!localChanged) {
+					writes.push({ record, remote });
+				} else if (localHash === record.contentHash) {
+					stagedEntries[path] = toNextcloudStateEntry(remote, record.contentHash);
+					skipped += 1;
+				} else {
+					conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, "edit-edit"));
+				}
+			}
+
+			const previousCount = Object.keys(previous?.entries ?? {}).length;
+			const deletionPercentage = previousCount === 0 ? 0 : deletions.length / previousCount;
+			if (deletions.length >= 10 && deletionPercentage >= 0.25) {
+				const confirmed = await this.confirmNextcloudDeletions({
+					target: formatNextcloudTarget(connection),
+					count: deletions.length,
+					percentage: deletionPercentage * 100
+				});
+				if (!confirmed) {
+					this.onStatusChange({ state: "idle" });
+					new Notice("Nextcloud pull cancelled; no changes were applied.");
+					return;
+				}
+			}
+
+			const state: NextcloudSyncState = {
+				type: "mysync-nextcloud-sync-state",
+				targetKey,
+				initializedAt: previous?.initializedAt ?? new Date().toISOString(),
+				lastCompletedAt: previous?.lastCompletedAt,
+				entries: stagedEntries
+			};
+			let restored = 0;
+			let deleted = 0;
+			this.applyingRemoteChange = true;
+			try {
+				for (const item of writes) {
+					await this.writeRecordToVault(item.record, item.record.path);
+					await this.localStore.saveFileRecordIfChanged(item.record);
+					state.entries[item.record.path] = toNextcloudStateEntry(item.remote, item.record.contentHash);
+					await this.localStore.saveNextcloudSyncState(state);
+					restored += 1;
+				}
+				for (const path of deletions) {
+					await this.deleteLocalFile(path);
+					await this.localStore.deleteFileRecordByPath(path);
+					delete state.entries[path];
+					await this.localStore.saveNextcloudSyncState(state);
+					deleted += 1;
+				}
+			} finally {
+				this.applyingRemoteChange = false;
+			}
+
+			for (const conflict of conflicts) await this.conflictStore.upsertConflict(conflict);
+			state.lastCompletedAt = new Date().toISOString();
+			await this.localStore.saveNextcloudSyncState(state);
+			await this.refreshActiveConflicts();
+			this.onStatusChange({ state: "pulled", docsRead, restored, deleted, skipped, conflicts: conflicts.length });
+			await this.onOperationCompleted("remotePull");
+			new Notice(`Nextcloud: downloaded ${restored}, deleted ${deleted}, skipped ${skipped}, conflicts ${conflicts.length}.`);
+		} catch (error) {
+			logger.error("Nextcloud pull failed", error);
+			this.onStatusChange({ state: "error", message: "Nextcloud pull failed" });
+			new Notice(getErrorMessage(error, "Nextcloud pull failed. Check the console for details."));
+		} finally {
+			notice.hide();
+			this.syncInProgress = false;
+			this.scheduleQueuedSync();
+		}
+	}
+
 	private async pushToNextcloud(pendingChangesOnly: boolean) {
 		if (this.isRunning()) {
 			logger.info("Nextcloud push skipped because another sync operation is running");
@@ -640,11 +1093,6 @@ export class SyncService {
 				message: validationMessage
 			});
 			new Notice(validationMessage);
-			return;
-		}
-
-		if (this.conflictedPaths.size > 0) {
-			this.blockPushForConflicts();
 			return;
 		}
 
@@ -713,23 +1161,28 @@ export class SyncService {
 				remotePath: connection.remotePath
 			});
 
-			const result = await this.nextcloudService.pushChanges(
-				connection,
-				{ records, deletedPaths },
-				(progress) => {
-					this.onStatusChange({
-						state: "pushing",
-						docsWritten: progress.current,
-						totalDocs: progress.total
-					});
-				}
-			);
+			const supportsSnapshots = typeof (this.localStore as Partial<PouchDbFileStore>).getNextcloudSyncState === "function"
+				&& typeof (this.nextcloudService as Partial<NextcloudService>).listFiles === "function";
+			const result = supportsSnapshots
+				? await this.pushNextcloudWithSnapshot(connection, targetKey, records, deletedPaths)
+				: await this.nextcloudService.pushChanges(
+					connection,
+					{ records, deletedPaths },
+					(progress) => {
+						this.onStatusChange({
+							state: "pushing",
+							docsWritten: progress.current,
+							totalDocs: progress.total
+						});
+					}
+				);
 
 			logger.info("Nextcloud push completed", {
 				uploaded: result.uploaded,
 				deleted: result.deleted,
 				skipped: result.skipped,
-				errors: result.errors
+				errors: result.errors,
+				conflicts: "conflicts" in result ? result.conflicts : 0
 			});
 
 			if (result.errors > 0) {
@@ -756,7 +1209,7 @@ export class SyncService {
 
 			await this.onOperationCompleted("remotePush");
 			new Notice(
-				`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}.`
+				`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}${"conflicts" in result ? `, conflicts ${result.conflicts}` : ""}.`
 			);
 		} catch (error) {
 			failed = true;
@@ -779,6 +1232,158 @@ export class SyncService {
 				this.refreshQueuedStatus();
 			}
 		}
+	}
+
+	private async refreshLocalIndexBeforeNextcloudPull() {
+		const result = await this.syncLocalFiles();
+		const indexedRecords = await this.localStore.listFileRecords({ attachments: false });
+		let removed = 0;
+		for (const record of indexedRecords) {
+			if (
+				this.isSupportedNextcloudPath(record.path)
+				&& !this.conflictedPaths.has(record.path)
+				&& !(await this.localPathExists(record.path))
+			) {
+				await this.localStore.deleteFileRecordByPath(record.path);
+				removed += 1;
+			}
+		}
+		return { ...result, total: result.total + removed, saved: result.saved + removed };
+	}
+
+	private async pushNextcloudWithSnapshot(
+		connection: NextcloudConnection,
+		targetKey: string,
+		records: VaultFileRecord[],
+		deletedPaths: string[]
+	) {
+		let state = await this.localStore.getNextcloudSyncState(targetKey);
+		if (!state) {
+			const inventory = await this.nextcloudService.listFiles(connection);
+			const relevant = inventory.filter((file) => this.isSupportedNextcloudPath(file.path));
+			if (relevant.length > 0) {
+				throw new Error("Nextcloud already contains syncable files. Run Pull from remote before pushing.");
+			}
+			state = {
+				type: "mysync-nextcloud-sync-state",
+				targetKey,
+				initializedAt: new Date().toISOString(),
+				entries: {}
+			};
+			await this.localStore.saveNextcloudSyncState(state);
+		}
+
+		let uploaded = 0;
+		let deleted = 0;
+		let skipped = 0;
+		let errors = 0;
+		let conflicts = 0;
+		const total = records.length + deletedPaths.length;
+		let current = 0;
+		for (const record of records) {
+			current += 1;
+			if (!this.isSupportedNextcloudPath(record.path) || this.conflictedPaths.has(record.path)) {
+				skipped += 1;
+				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+				continue;
+			}
+			const before = state.entries[record.path];
+			if (before?.syncedContentHash === record.contentHash) {
+				skipped += 1;
+				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+				continue;
+			}
+			try {
+				const upload = await getNextcloudUpload(record);
+				const metadata = await this.nextcloudService.uploadFile(
+					connection,
+					record.path,
+					upload.content,
+					upload.contentType,
+					before ? { ifMatch: before.etag } : { ifNoneMatch: "*" }
+				);
+				state.entries[record.path] = toNextcloudStateEntry(metadata, record.contentHash);
+				await this.localStore.saveNextcloudSyncState(state);
+				uploaded += 1;
+			} catch (error) {
+				if (isPreconditionFailure(error)) {
+					const converged = await this.remoteContentMatches(connection, record.path, record.contentHash);
+					if (converged) {
+						state.entries[record.path] = toNextcloudStateEntry(converged, record.contentHash);
+						await this.localStore.saveNextcloudSyncState(state);
+						uploaded += 1;
+					} else {
+						const remote = await this.getNextcloudMetadataIfExists(connection, record.path);
+						await this.conflictStore.upsertConflict(this.createNextcloudConflict(
+							targetKey,
+							record.path,
+							record,
+							remote,
+							undefined,
+							remote ? "edit-edit" : "local-edit-remote-delete"
+						));
+						conflicts += 1;
+					}
+				} else {
+					logger.error("Nextcloud upload failed", error, { path: record.path });
+					errors += 1;
+				}
+			}
+			this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+		}
+
+		for (const path of deletedPaths) {
+			current += 1;
+			const before = state.entries[path];
+			if (!before || !this.isSupportedNextcloudPath(path) || this.conflictedPaths.has(path)) {
+				skipped += 1;
+				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+				continue;
+			}
+			try {
+				await this.nextcloudService.deleteFile(connection, path, { ifMatch: before.etag });
+				delete state.entries[path];
+				await this.localStore.saveNextcloudSyncState(state);
+				deleted += 1;
+			} catch (error) {
+				if (isPreconditionFailure(error)) {
+					const remote = await this.getNextcloudMetadataIfExists(connection, path);
+					if (!remote) {
+						delete state.entries[path];
+						await this.localStore.saveNextcloudSyncState(state);
+						deleted += 1;
+					} else {
+						await this.conflictStore.upsertConflict(this.createNextcloudConflict(
+							targetKey, path, null, remote, undefined, "local-delete-remote-edit"
+						));
+						conflicts += 1;
+					}
+				} else {
+					logger.error("Nextcloud deletion failed", error, { path });
+					errors += 1;
+				}
+			}
+			this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+		}
+
+		if (errors === 0) {
+			state.lastCompletedAt = new Date().toISOString();
+			await this.localStore.saveNextcloudSyncState(state);
+		}
+		if (conflicts > 0) await this.refreshActiveConflicts();
+		return { uploaded, deleted, skipped, errors, conflicts };
+	}
+
+	private async remoteContentMatches(
+		connection: NextcloudConnection,
+		path: string,
+		expectedHash: string
+	): Promise<NextcloudRemoteFile | null> {
+		const metadata = await this.getNextcloudMetadataIfExists(connection, path);
+		if (!metadata) return null;
+		const download = await this.nextcloudService.downloadFile(connection, path, metadata.etag);
+		const record = await this.recordFromNextcloudDownload(download);
+		return record.contentHash === expectedHash ? metadata : null;
 	}
 
 	async pushToCouchDb() {
@@ -1169,6 +1774,7 @@ export class SyncService {
 			const now = new Date().toISOString();
 			await this.conflictStore.upsertConflict({
 				_id: createConflictId(state.recordId),
+				backend: "couchdb",
 				recordId: state.recordId,
 				path,
 				kind: conflictKind,
@@ -2124,6 +2730,64 @@ export class SyncService {
 		return isPathInsideSyncFolder(path, this.getCurrentSyncFolder());
 	}
 
+	private isSupportedNextcloudPath(path: string) {
+		return this.isPathInsideCurrentSyncScope(path)
+			&& (isSupportedSyncFilePath(path) || this.isSyncedObsidianConfigurationFilePath(path));
+	}
+
+	private async recordFromNextcloudDownload(download: NextcloudDownload) {
+		return createFileRecordFromContent(
+			download.path,
+			download.content,
+			download.contentType,
+			download.lastModified,
+			this.isSyncedObsidianConfigurationFilePath(download.path)
+				? "obsidian-config"
+				: "vault"
+		);
+	}
+
+	private createNextcloudConflict(
+		targetKey: string,
+		path: string,
+		local: VaultFileRecord | null,
+		remote: NextcloudRemoteFile | undefined,
+		remoteContentHash: string | undefined,
+		kind: SyncConflictKind
+	): NextcloudSyncConflict {
+		const now = new Date().toISOString();
+		return {
+			_id: `mysync-nextcloud-conflict:${targetKey}:${createFileRecordId(path)}`,
+			backend: "nextcloud",
+			targetKey,
+			recordId: createFileRecordId(path),
+			path,
+			kind,
+			status: "pending",
+			detectedAt: now,
+			updatedAt: now,
+			observedLocalContentHash: local?.contentHash,
+			localVariant: local
+				? {
+					exists: true,
+					contentHash: local.contentHash,
+					fileType: local.fileType,
+					lastChanged: local.lastChanged
+				}
+				: { exists: false },
+			remote: remote
+				? {
+					exists: true,
+					etag: remote.etag,
+					lastModified: remote.lastModified,
+					size: remote.size,
+					contentType: remote.contentType,
+					contentHash: remoteContentHash
+				}
+				: { exists: false }
+		};
+	}
+
 	private async createLocalRecord(path: string) {
 		if (isObsidianConfigFilePath(this.app, path)) {
 			const stat = await this.app.vault.adapter.stat(path);
@@ -2323,6 +2987,40 @@ function createNextcloudTargetKey(
 	});
 }
 
+function toNextcloudStateEntry(
+	remote: NextcloudRemoteFile,
+	syncedContentHash: string
+): NextcloudSyncStateEntry {
+	return {
+		path: remote.path,
+		etag: remote.etag,
+		lastModified: remote.lastModified,
+		size: remote.size,
+		contentType: remote.contentType,
+		syncedContentHash
+	};
+}
+
+function formatNextcloudTarget(connection: NextcloudConnection) {
+	const path = connection.remotePath.replace(/^\/+|\/+$/g, "");
+	return `${connection.url.replace(/\/+$/g, "")}/${path}`;
+}
+
+async function getNextcloudUpload(record: VaultFileRecord) {
+	if (record.fileType === "markdown" && typeof record.content === "string") {
+		return {
+			content: record.content,
+			contentType: "text/markdown; charset=utf-8"
+		};
+	}
+	const content = await getAttachmentArrayBuffer(record);
+	if (!content) throw new Error(`Upload content is unavailable for ${record.path}.`);
+	return {
+		content,
+		contentType: record.mimeType ?? "application/octet-stream"
+	};
+}
+
 function isHttpUrl(value: string) {
 	try {
 		const url = new URL(value);
@@ -2340,6 +3038,10 @@ function getErrorMessage(error: unknown, fallback: string) {
 	return fallback;
 }
 
+function isPreconditionFailure(error: unknown) {
+	return error instanceof NextcloudHttpError && error.status === 412;
+}
+
 function normalizeRestoredPath(path: string) {
 	if (path.startsWith("/")) {
 		return null;
@@ -2354,5 +3056,3 @@ function normalizeRestoredPath(path: string) {
 
 	return normalizedPath;
 }
-
-

@@ -54,7 +54,7 @@ export class PouchDbConflictStore {
 		});
 	}
 
-	async upsertConflict(conflict: Omit<SyncConflict, "_rev">) {
+	async upsertConflict(conflict: SyncConflict) {
 		return this.runWithLocalDb("upsertConflict", async (conflictDb) => {
 			try {
 				const existing = await conflictDb.get(conflict._id);
@@ -62,7 +62,7 @@ export class PouchDbConflictStore {
 					...conflict,
 					detectedAt: existing.status === "resolved" ? conflict.detectedAt : existing.detectedAt,
 					_rev: existing._rev
-				});
+				} as SyncConflict & PouchDB.ExistingDocument);
 			} catch (error) {
 				if (isPouchNotFound(error)) {
 					await conflictDb.put(conflict);

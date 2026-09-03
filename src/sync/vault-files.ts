@@ -129,6 +129,13 @@ export function isSyncableVaultFile(file: TFile) {
 	return !isSyncBlacklistedPath(file.path);
 }
 
+export function isSupportedSyncFilePath(path: string) {
+	const fileName = path.slice(path.lastIndexOf("/") + 1);
+	const dotIndex = fileName.lastIndexOf(".");
+	const extension = dotIndex > 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
+	return extension === "md" || extension in IMAGE_MIME_TYPES || extension in BINARY_MIME_TYPES;
+}
+
 export function isSyncBlacklistedPath(path: string) {
 	const fileName = path.split("/").pop();
 	return typeof fileName === "string" && BLACKLISTED_SYNC_FILE_NAMES.has(fileName);
@@ -220,6 +227,60 @@ export async function createObsidianConfigFileRecord(
 		lastChanged: stat.mtime,
 		lastChangedIso: new Date(stat.mtime).toISOString()
 	};
+}
+
+export async function createFileRecordFromContent(
+	path: string,
+	content: ArrayBuffer,
+	contentType?: string,
+	lastModified?: string,
+	source?: "vault" | "obsidian-config"
+): Promise<VaultFileRecord> {
+	const fileName = path.slice(path.lastIndexOf("/") + 1);
+	const dotIndex = fileName.lastIndexOf(".");
+	const extension = dotIndex > 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
+	const imageMimeType = getImageMimeType(extension);
+	const knownMimeType = imageMimeType ?? getBinaryMimeType(extension);
+	const fileType = source === "obsidian-config"
+		? "binary"
+		: getVaultFileType(extension, imageMimeType, knownMimeType);
+	const changed = lastModified ? Date.parse(lastModified) : Date.now();
+	const lastChanged = Number.isFinite(changed) ? changed : Date.now();
+	const record: VaultFileRecord = {
+		_id: createFileRecordId(path),
+		type: "vault-file",
+		...(source ? { source } : {}),
+		fileType,
+		fileName,
+		path,
+		size: content.byteLength,
+		contentHash: "",
+		lastChanged,
+		lastChangedIso: new Date(lastChanged).toISOString()
+	};
+
+	if (fileType === "markdown") {
+		const text = normalizeTextContent(new TextDecoder("utf-8", { fatal: true }).decode(content));
+		record.content = text;
+		record.contentHash = await createTextContentHash(text);
+		return record;
+	}
+
+	const mimeType = source === "obsidian-config"
+		? BINARY_MIME_TYPE
+		: knownMimeType ?? contentType?.split(";", 1)[0] ?? BINARY_MIME_TYPE;
+	if (fileType === "other") {
+		throw new Error(`Unsupported remote file type: ${path}`);
+	}
+	record.mimeType = mimeType;
+	record.contentHash = await createBinaryContentHash(content);
+	record._attachments = {
+		[FILE_ATTACHMENT_ID]: {
+			content_type: mimeType,
+			data: new Blob([content], { type: mimeType })
+		}
+	};
+	return record;
 }
 
 export function createFileRecordId(path: string) {

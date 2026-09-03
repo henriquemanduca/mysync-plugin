@@ -1,6 +1,10 @@
 import { requestUrl } from "obsidian";
 import PouchDB from "pouchdb/dist/pouchdb";
-import type { ConflictResolutionStrategy, VaultFileRecord } from "./types";
+import type {
+	ConflictResolutionStrategy,
+	NextcloudSyncState,
+	VaultFileRecord
+} from "./types";
 import { createFileRecordId, getPathFromFileRecordId, isSyncBlacklistedPath } from "./vault-files";
 import { Logger } from "../utils/logger";
 import { isPouchNotFound } from "../utils/pouchdb-errors";
@@ -63,6 +67,7 @@ const VAULT_FILE_END_KEY = "vault-file:\ufff0";
 const LOCAL_SYNC_BASELINE_LOCAL_DOC_ID = "_local/mysync-local-sync-baseline";
 const REMOTE_BASELINE_LOCAL_DOC_PREFIX = "_local/mysync-remote-baseline:";
 const NEXTCLOUD_PUSH_CHECKPOINT_LOCAL_DOC_PREFIX = "_local/mysync-nextcloud-push:";
+const NEXTCLOUD_SYNC_STATE_LOCAL_DOC_PREFIX = "_local/mysync-nextcloud-state:";
 
 type OpenRevision<T extends { _id: string }> =
 	| { ok: (T & PouchDB.ExistingDocument) | (PouchDB.ExistingDocument & { _deleted: true }) }
@@ -100,10 +105,16 @@ interface NextcloudPushCheckpointDocument {
 	savedAt: string;
 }
 
+interface NextcloudSyncStateDocument extends NextcloudSyncState {
+	_id: string;
+	_rev?: string;
+}
+
 type LocalMetadataDocument =
 	| LocalSyncBaselineDocument
 	| RemoteBaselineDocument
-	| NextcloudPushCheckpointDocument;
+	| NextcloudPushCheckpointDocument
+	| NextcloudSyncStateDocument;
 
 interface LocalDocumentStore {
 	get(id: string): Promise<LocalMetadataDocument & PouchDB.ExistingDocument>;
@@ -571,6 +582,46 @@ export class PouchDbFileStore {
 		});
 	}
 
+	async getNextcloudSyncState(targetKey: string): Promise<NextcloudSyncState | null> {
+		return this.runWithLocalDb("getNextcloudSyncState", async (fileDb) => {
+			const stateId = await createNextcloudSyncStateLocalDocumentId(targetKey);
+			try {
+				const state = await getLocalDocumentStore(fileDb).get(stateId);
+				if (state.type !== "mysync-nextcloud-sync-state" || state.targetKey !== targetKey) {
+					return null;
+				}
+				const { _id: ignoredId, _rev: ignoredRev, ...value } = state as NextcloudSyncStateDocument & PouchDB.ExistingDocument;
+				void ignoredId;
+				void ignoredRev;
+				return structuredClone(value);
+			} catch (error) {
+				if (isPouchNotFound(error)) return null;
+				throw error;
+			}
+		});
+	}
+
+	async saveNextcloudSyncState(state: NextcloudSyncState) {
+		return this.runWithLocalDb("saveNextcloudSyncState", async (fileDb) => {
+			const stateId = await createNextcloudSyncStateLocalDocumentId(state.targetKey);
+			const localDocs = getLocalDocumentStore(fileDb);
+			const document: NextcloudSyncStateDocument = {
+				_id: stateId,
+				...structuredClone(state)
+			};
+			try {
+				const existing = await localDocs.get(stateId);
+				await localDocs.put({ ...document, _rev: existing._rev });
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					await localDocs.put(document);
+					return;
+				}
+				throw error;
+			}
+		});
+	}
+
 	async listAllFileRecordIds() {
 		return this.runWithLocalDb("listAllFileRecordIds", async (fileDb) => {
 			const changes = await fileDb.changes({
@@ -882,6 +933,10 @@ async function createRemoteBaselineLocalDocumentId(connection: CouchDbConnection
 
 async function createNextcloudPushCheckpointLocalDocumentId(targetKey: string) {
 	return `${NEXTCLOUD_PUSH_CHECKPOINT_LOCAL_DOC_PREFIX}${await createSha256Hex(targetKey)}`;
+}
+
+async function createNextcloudSyncStateLocalDocumentId(targetKey: string) {
+	return `${NEXTCLOUD_SYNC_STATE_LOCAL_DOC_PREFIX}${await createSha256Hex(targetKey)}`;
 }
 
 async function createSha256Hex(value: string) {

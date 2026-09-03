@@ -3,6 +3,24 @@
 ## 1. Visão Geral
 Este documento apresenta o levantamento de requisitos para a integração do plugin de sincronização do Obsidian (MySync) com o ecossistema **Nextcloud**. O objetivo é expandir as capacidades do plugin atual para suportar servidores Nextcloud, oferecendo uma alternativa robusta e auto-hospedada (self-hosted) aos usuários para manter a sincronia de seus cofres (Vaults).
 
+### Estado da implementação
+
+A integração principal está implementada no endpoint WebDAV legado já usado pelo
+plugin. O cliente lista a árvore sequencialmente com `PROPFIND Depth: 1`, exige
+metadados e `ETag`, baixa com `GET If-Match` e grava/exclui com precondições HTTP.
+Um snapshot local separado por URL, usuário, pasta remota, pasta local e opção de
+configuração registra o último conteúdo confirmado sem armazenar a senha.
+
+O primeiro pull faz uma mesclagem conservadora e nunca interpreta arquivos apenas
+locais como exclusões. Mudanças concorrentes viram conflitos resolvíveis por
+**Keep local**, **Keep remote**, **Keep both** ou **Delete**. Exclusões remotas de
+10 ou mais arquivos que alcancem 25% do snapshot anterior exigem confirmação.
+Falha ou listagem incompleta não atualiza o horário do último pull.
+
+O escopo atual inclui Markdown, PDF, imagens reconhecidas e os arquivos de
+configuração de primeiro nível permitidos. Permanecem fora do escopo certificados
+autoassinados, E2EE, arquivos arbitrários e migração para outro endpoint WebDAV.
+
 ## 2. Possibilidades de Uso que o Nextcloud Oferece
 
 O Nextcloud não é apenas um servidor de arquivos, mas uma plataforma rica. Integrar o Obsidian com o Nextcloud abre as seguintes possibilidades:
@@ -84,4 +102,3 @@ A exclusão exige muito cuidado. A ausência de um arquivo não basta, é precis
 - **Usuário deleta nota no Obsidian:** O plugin percebe que o arquivo sumiu localmente, mas ele existia no Histórico Local. Isso significa que o usuário deletou de propósito. O cliente envia um comando `DELETE` para o Nextcloud.
 - **Outro dispositivo deleta a nota no Remoto:** O plugin consulta o Nextcloud e nota que um arquivo sumiu lá (não está na lista WebDAV), mas ainda existe no cofre local e no Histórico Local. Isso significa que foi apagado via outro dispositivo. O cliente, então, deleta silenciosamente o arquivo do seu cofre Obsidian.
 - **Proteção Contra Erros (Orphaned Files):** Se o plugin não conseguir alcançar a pasta no servidor, ele deve abortar a sincronia para evitar achar falsamente que "tudo foi deletado lá" e acabar apagando o Vault inteiro.
-

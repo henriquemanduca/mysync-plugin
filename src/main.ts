@@ -7,6 +7,7 @@ import type { SyncConflict } from "./sync/types";
 import { ConflictResolutionModal } from "./conflict-resolution-modal";
 import { EmptyFolderCleanupModal } from "./empty-folder-cleanup-modal";
 import { LocalDatabaseResetModal } from "./local-database-reset-modal";
+import { NextcloudDeletionConfirmationModal } from "./nextcloud-deletion-confirmation-modal";
 import { formatDateTime } from "./utils/date-format";
 import { isLoggerLevel, Logger } from "./utils/logger";
 import { isAndroidApp } from "./utils/platform";
@@ -69,7 +70,10 @@ export default class MySyncPlugin extends Plugin {
 			() => this.settings,
 			(status) => this.updateSyncStatus(status),
 			(operation) => this.saveCompletedSyncOperation(operation),
-			(conflicts) => this.handleConflictsChanged(conflicts)
+			(conflicts) => this.handleConflictsChanged(conflicts),
+			(details) => new Promise<boolean>((resolve) => {
+				new NextcloudDeletionConfirmationModal(this.app, details, resolve).open();
+			})
 		);
 		await this.syncService.initialize();
 
@@ -110,7 +114,7 @@ export default class MySyncPlugin extends Plugin {
 			id: "pull-from-remote",
 			name: "Pull from remote",
 			callback: () => {
-				void this.syncService.pullFromCouchDb();
+				void this.syncService.pullFromRemote();
 			}
 		});
 

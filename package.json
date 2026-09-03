@@ -33,6 +33,7 @@
 		"vitest": "^4.1.10"
 	},
 	"dependencies": {
+		"fast-xml-parser": "^5.11.1",
 		"obsidian": "^1.13.1",
 		"pouchdb": "^9.0.0"
 	},

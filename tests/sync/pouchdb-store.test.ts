@@ -117,4 +117,40 @@ describe("PouchDbFileStore Nextcloud changes", () => {
 		await expect(store.getNextcloudPushCheckpoint(targetKey)).resolves.toBe("8-g1AAA");
 		expect(String(saved._id)).toMatch(/^_local\/mysync-nextcloud-push:/);
 	});
+
+	it("persists a credential-free sync snapshot isolated by target key", async () => {
+		const db = pouchState.db as ReturnType<typeof createDatabaseMock>;
+		db.get.mockRejectedValueOnce({ status: 404 });
+		db.put.mockResolvedValue({ ok: true });
+		const store = new PouchDbFileStore("test-db");
+		const targetKey = JSON.stringify({
+			url: "https://cloud.example.com",
+			username: "alice",
+			remotePath: "Notes",
+			syncFolder: "Projects",
+			syncObsidianConfig: true
+		});
+		await store.saveNextcloudSyncState({
+			type: "mysync-nextcloud-sync-state",
+			targetKey,
+			initializedAt: "2026-09-03T00:00:00.000Z",
+			entries: {
+				"Projects/a.md": {
+					path: "Projects/a.md",
+					etag: "\"one\"",
+					size: 5,
+					syncedContentHash: "hash"
+				}
+			}
+		});
+
+		const saved = db.put.mock.calls[0]?.[0];
+		expect(saved).toMatchObject({ type: "mysync-nextcloud-sync-state", targetKey });
+		expect(JSON.stringify(saved)).not.toContain("password");
+		expect(String(saved._id)).toMatch(/^_local\/mysync-nextcloud-state:/);
+		db.get.mockResolvedValue({ ...saved, _rev: "1-state" });
+		await expect(store.getNextcloudSyncState(targetKey)).resolves.toMatchObject({
+			entries: { "Projects/a.md": { etag: "\"one\"", syncedContentHash: "hash" } }
+		});
+	});
 });
