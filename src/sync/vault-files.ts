@@ -260,7 +260,13 @@ export async function createFileRecordFromContent(
 	};
 
 	if (fileType === "markdown") {
-		const text = normalizeTextContent(new TextDecoder("utf-8", { fatal: true }).decode(content));
+		let decoded: string;
+		try {
+			decoded = new TextDecoder("utf-8", { fatal: true }).decode(content);
+		} catch {
+			decoded = new TextDecoder("utf-8", { fatal: false }).decode(content);
+		}
+		const text = normalizeTextContent(decoded);
 		record.content = text;
 		record.contentHash = await createTextContentHash(text);
 		return record;

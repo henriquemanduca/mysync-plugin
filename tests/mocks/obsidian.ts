@@ -60,6 +60,11 @@ export class Notice {
 		Notice.instances.push(this);
 	}
 
+	setMessage(message: string | DocumentFragment): this {
+		this.message = message;
+		return this;
+	}
+
 	hide() {
 		this.hidden = true;
 	}

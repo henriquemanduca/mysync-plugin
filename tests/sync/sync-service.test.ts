@@ -554,21 +554,69 @@ describe("SyncService Nextcloud pull", () => {
 				syncedContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 			}]))
 		});
+		const downloadFile = vi.fn();
 		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
 			listFiles: vi.fn().mockResolvedValue(files.slice(10).map((file) => ({
 				path: file.path,
 				etag: `\"${file.path}\"`,
 				size: 5,
 				contentType: "text/markdown"
-			})))
+			}))),
+			downloadFile
 		};
 
 		await fixture.service.pullFromRemote();
 
 		expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ count: 10, percentage: 25 }));
+		expect(downloadFile).not.toHaveBeenCalled();
 		expect(fixture.fileManager.trashFile).not.toHaveBeenCalled();
 		expect(fixture.store.saveNextcloudSyncState).not.toHaveBeenCalled();
 		expect(fixture.onOperationCompleted).not.toHaveBeenCalledWith("remotePull");
+	});
+
+	it("downloads multiple remote files concurrently and writes them immediately to the vault", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		fixture.settings.nextcloudRemotePath = "/Notes";
+		const remotes = [
+			{ path: "note-1.md", etag: "\"e1\"", lastModified: "Wed, 02 Sep 2026 12:00:00 GMT", size: 6, contentType: "text/markdown" },
+			{ path: "note-2.md", etag: "\"e2\"", lastModified: "Wed, 02 Sep 2026 12:00:00 GMT", size: 6, contentType: "text/markdown" },
+			{ path: "note-3.md", etag: "\"e3\"", lastModified: "Wed, 02 Sep 2026 12:00:00 GMT", size: 6, contentType: "text/markdown" }
+		];
+		const listFiles = vi.fn().mockResolvedValue(remotes);
+		const downloadFile = vi.fn().mockImplementation(async (_conn, path) => ({
+			path,
+			etag: `\"etag-${path}\"`,
+			size: 6,
+			contentType: "text/markdown",
+			content: arrayBuffer(`body for ${path}`)
+		}));
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles,
+			downloadFile
+		};
+
+		await fixture.service.pullFromRemote();
+
+		expect(downloadFile).toHaveBeenCalledTimes(3);
+		expect(fixture.vault.create).toHaveBeenCalledWith("note-1.md", "body for note-1.md");
+		expect(fixture.vault.create).toHaveBeenCalledWith("note-2.md", "body for note-2.md");
+		expect(fixture.vault.create).toHaveBeenCalledWith("note-3.md", "body for note-3.md");
+		expect(fixture.store.saveNextcloudSyncState).toHaveBeenCalledWith(expect.objectContaining({
+			entries: expect.objectContaining({
+				"note-1.md": expect.objectContaining({ etag: "\"e1\"" }),
+				"note-2.md": expect.objectContaining({ etag: "\"e2\"" }),
+				"note-3.md": expect.objectContaining({ etag: "\"e3\"" })
+			})
+		}));
+		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePull");
+		const statusStates = fixture.statuses.map((status) => status.state);
+		expect(statusStates).not.toContain("pulling");
+		expect(statusStates).toContain("restoring");
+		expect(statusStates).toContain("pulled");
 	});
 });
 
@@ -858,6 +906,87 @@ describe("SyncService Nextcloud push", () => {
 			targetKey: expect.not.stringContaining("app-password")
 		}));
 		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalled();
+	});
+
+	it("pushes successfully without existing snapshot state and without listing remote files", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const record = markdownRecord("note.md");
+		fixture.store.listFileRecords.mockResolvedValue([record]);
+		fixture.store.getNextcloudSyncState.mockResolvedValue(null);
+		const uploadFile = vi.fn().mockResolvedValue({
+			path: "note.md",
+			etag: "\"fresh-etag\"",
+			size: 5,
+			contentType: "text/markdown"
+		});
+		const listFiles = vi.fn();
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles,
+			uploadFile,
+			deleteFile: vi.fn()
+		};
+
+		await fixture.service.pushToRemote();
+
+		expect(listFiles).not.toHaveBeenCalled();
+		expect(uploadFile).toHaveBeenCalledWith(
+			expect.any(Object),
+			"note.md",
+			"hello",
+			"text/markdown; charset=utf-8",
+			{}
+		);
+		expect(fixture.store.saveNextcloudSyncState).toHaveBeenCalledWith(expect.objectContaining({
+			entries: { "note.md": expect.objectContaining({ etag: "\"fresh-etag\"" }) }
+		}));
+	});
+
+	it("pushes pending changes quickly when snapshot state is missing", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const changedRecord = markdownRecord("Area/changed.md", "updated");
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(5);
+		fixture.store.getNextcloudSyncState.mockResolvedValue(null);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: changedRecord._id,
+				path: changedRecord.path,
+				deleted: false,
+				record: changedRecord
+			}],
+			lastSequence: 6
+		});
+		const uploadFile = vi.fn().mockResolvedValue({
+			path: "Area/changed.md",
+			etag: "\"v2\"",
+			size: 7,
+			contentType: "text/markdown"
+		});
+		const listFiles = vi.fn();
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles,
+			uploadFile,
+			deleteFile: vi.fn()
+		};
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(listFiles).not.toHaveBeenCalled();
+		expect(uploadFile).toHaveBeenCalledWith(
+			expect.any(Object),
+			"Area/changed.md",
+			"updated",
+			"text/markdown; charset=utf-8",
+			{}
+		);
+		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalledWith(expect.any(String), 6);
 	});
 
 	it("pushes only changes after the checkpoint during a pending push", async () => {

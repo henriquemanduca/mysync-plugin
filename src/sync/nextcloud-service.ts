@@ -62,6 +62,8 @@ type NextcloudDeleteStatus = "deleted" | "missing";
 type NextcloudDirectoryState = "empty" | "not-empty" | "missing" | "unknown";
 
 export class NextcloudService {
+	private ensuredDirectories = new Set<string>();
+
 	async listFiles(conn: NextcloudConnection): Promise<NextcloudRemoteFile[]> {
 		const rootUrl = this.buildWebDavUrl(conn, "");
 		const rootSegments = decodeUrlSegments(new URL(rootUrl).pathname);
@@ -69,13 +71,7 @@ export class NextcloudService {
 		const visitedDirectories = new Set<string>();
 		const files = new Map<string, NextcloudRemoteFile>();
 
-		while (pendingDirectories.length > 0) {
-			const directoryPath = pendingDirectories.shift()!;
-			if (visitedDirectories.has(directoryPath)) {
-				throw new Error(`Nextcloud listing contains a duplicate directory: ${directoryPath || "/"}`);
-			}
-			visitedDirectories.add(directoryPath);
-
+		const processDirectory = async (directoryPath: string): Promise<string[]> => {
 			const url = this.buildWebDavUrl(conn, directoryPath ? `${directoryPath}/` : "");
 			const result = await this.request({
 				url,
@@ -93,6 +89,7 @@ export class NextcloudService {
 			}
 
 			let foundSelf = false;
+			const subdirs: string[] = [];
 			for (const response of responses) {
 				const relativePath = getSafeRelativeHrefPath(response.href, url, rootSegments);
 				const normalizedDirectory = directoryPath.replace(/\/+$/g, "");
@@ -114,7 +111,7 @@ export class NextcloudService {
 				}
 
 				if (response.isCollection) {
-					pendingDirectories.push(relativePath);
+					subdirs.push(relativePath);
 					continue;
 				}
 
@@ -136,7 +133,53 @@ export class NextcloudService {
 			if (!foundSelf) {
 				throw new Error(`Nextcloud listing is incomplete for ${directoryPath || "/"}.`);
 			}
-		}
+
+			return subdirs;
+		};
+
+		const CONCURRENCY = 4;
+		let activeCount = 0;
+		let queueIndex = 0;
+		let firstError: unknown = null;
+
+		await new Promise<void>((resolve, reject) => {
+			const tryNext = () => {
+				if (firstError) {
+					if (activeCount === 0) reject(firstError);
+					return;
+				}
+				if (queueIndex >= pendingDirectories.length) {
+					if (activeCount === 0) resolve();
+					return;
+				}
+				while (activeCount < CONCURRENCY && queueIndex < pendingDirectories.length && !firstError) {
+					const dir = pendingDirectories[queueIndex++]!;
+					if (visitedDirectories.has(dir)) {
+						firstError = new Error(`Nextcloud listing contains a duplicate directory: ${dir || "/"}`);
+						if (activeCount === 0) reject(firstError);
+						return;
+					}
+					visitedDirectories.add(dir);
+					activeCount++;
+
+					processDirectory(dir)
+						.then((subdirs) => {
+							for (const sub of subdirs) {
+								pendingDirectories.push(sub);
+							}
+							activeCount--;
+							tryNext();
+						})
+						.catch((err) => {
+							if (!firstError) firstError = err;
+							activeCount--;
+							tryNext();
+						});
+				}
+			};
+
+			tryNext();
+		});
 
 		return Array.from(files.values()).sort((left, right) => left.path.localeCompare(right.path));
 	}
@@ -182,7 +225,9 @@ export class NextcloudService {
 				"If-Match": expectedEtag
 			}
 		}, "Nextcloud download");
-		const etag = getResponseHeader(result.headers, "etag") ?? expectedEtag;
+		const etag = getResponseHeader(result.headers, "etag")
+			?? getResponseHeader(result.headers, "oc-etag")
+			?? expectedEtag;
 		return {
 			path,
 			etag,
@@ -240,12 +285,21 @@ export class NextcloudService {
 			return;
 		}
 
+		const base = conn.url.replace(/\/+$/, "");
+		const fullCacheKey = `${base}|${combinedPath}`;
+		if (this.ensuredDirectories.has(fullCacheKey)) {
+			return;
+		}
+
 		const segments = combinedPath.split("/");
 		let currentPath = "";
-		const base = conn.url.replace(/\/+$/, "");
 
 		for (const segment of segments) {
 			currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+			const segmentCacheKey = `${base}|${currentPath}`;
+			if (this.ensuredDirectories.has(segmentCacheKey)) {
+				continue;
+			}
 			
 			const encodedSegments = currentPath.split("/").map(encodeURIComponent).join("/");
 			const url = `${base}/remote.php/webdav/${encodedSegments}/`;
@@ -258,6 +312,7 @@ export class NextcloudService {
 				});
 
 				if (result.status === 405) {
+					this.ensuredDirectories.add(segmentCacheKey);
 					continue;
 				}
 
@@ -265,18 +320,21 @@ export class NextcloudService {
 					throw new Error(`Nextcloud directory creation failed: HTTP ${result.status}`);
 				}
 
+				this.ensuredDirectories.add(segmentCacheKey);
 				logger.debug("Created remote directory", { path: currentPath });
 			} catch (error) {
 				const status = getHttpStatus(error);
 
 				// 405 Method Not Allowed = directory already exists
 				if (status === 405) {
+					this.ensuredDirectories.add(segmentCacheKey);
 					continue;
 				}
 
 				throw error;
 			}
 		}
+		this.ensuredDirectories.add(fullCacheKey);
 	}
 
 	/**
@@ -313,7 +371,8 @@ export class NextcloudService {
 		}, "Nextcloud upload");
 
 		logger.debug("Uploaded file to Nextcloud", { path: vaultFilePath });
-		const etag = getResponseHeader(result.headers, "etag");
+		const etag = getResponseHeader(result.headers, "etag")
+			?? getResponseHeader(result.headers, "oc-etag");
 		return etag
 			? {
 				path: vaultFilePath,
@@ -537,6 +596,7 @@ export class NextcloudService {
 		path: string,
 		precondition: NextcloudWritePrecondition = {}
 	): Promise<NextcloudDeleteStatus> {
+		this.ensuredDirectories.clear();
 		const url = this.buildWebDavUrl(conn, path);
 
 		try {

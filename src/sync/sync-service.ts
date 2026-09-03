@@ -930,9 +930,10 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-		const notice = new Notice("Pulling from Nextcloud.", 0);
+		const notice = new Notice("Nextcloud: Indexing local files...", 0);
 		try {
-			await this.refreshLocalIndexBeforeNextcloudPull();
+			const { localRecordsByPath } = await this.refreshLocalIndexBeforeNextcloudPull(notice);
+			notice.setMessage?.("Nextcloud: Listing remote files...");
 			const connection = createNextcloudConnection(settings);
 			const targetKey = createNextcloudTargetKey(
 				connection,
@@ -949,34 +950,34 @@ export class SyncService {
 				...remoteByPath.keys()
 			]);
 			const stagedEntries: Record<string, NextcloudSyncStateEntry> = structuredClone(previous?.entries ?? {});
-			const writes: Array<{ record: VaultFileRecord; remote: NextcloudRemoteFile }> = [];
 			const deletions: string[] = [];
 			const conflicts: NextcloudSyncConflict[] = [];
-			let docsRead = 0;
+
+			interface DownloadTask {
+				path: string;
+				remote: NextcloudRemoteFile;
+				before?: NextcloudSyncStateEntry;
+				local?: VaultFileRecord | null;
+				localPathCollision: boolean;
+			}
+			const pendingDownloads: DownloadTask[] = [];
 			let skipped = skippedUnsupported;
 
 			for (const path of Array.from(allPaths).sort()) {
 				const before = previous?.entries[path];
 				const remote = remoteByPath.get(path);
-				const local = await this.createLocalRecord(path);
+				let local: VaultFileRecord | null = localRecordsByPath.get(path) ?? null;
 				const localPathCollision = !local && (
 					await this.localPathExists(path) || await this.hasRestorePathCollision(path)
 				);
+				if (!local && localPathCollision) {
+					local = await this.createLocalRecord(path);
+				}
 				const localHash = local?.contentHash;
 
 				if (!before) {
 					if (!remote) continue;
-					const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
-					docsRead += 1;
-					const record = await this.recordFromNextcloudDownload(download);
-					if (localPathCollision || (localHash && localHash !== record.contentHash)) {
-						conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, localPathCollision ? "path-collision" : "edit-edit"));
-					} else if (localHash === record.contentHash) {
-						stagedEntries[path] = toNextcloudStateEntry(remote, record.contentHash);
-						skipped += 1;
-					} else {
-						writes.push({ record, remote });
-					}
+					pendingDownloads.push({ path, remote, before, local, localPathCollision });
 					continue;
 				}
 
@@ -992,25 +993,12 @@ export class SyncService {
 				}
 
 				const remoteChanged = remote.etag !== before.etag;
-				const localChanged = localHash !== before.syncedContentHash;
 				if (!remoteChanged) {
 					skipped += 1;
 					continue;
 				}
 
-				const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
-				docsRead += 1;
-				const record = await this.recordFromNextcloudDownload(download);
-				if (!local) {
-					conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, localPathCollision ? "path-collision" : "local-delete-remote-edit"));
-				} else if (!localChanged) {
-					writes.push({ record, remote });
-				} else if (localHash === record.contentHash) {
-					stagedEntries[path] = toNextcloudStateEntry(remote, record.contentHash);
-					skipped += 1;
-				} else {
-					conflicts.push(this.createNextcloudConflict(targetKey, path, local, remote, record.contentHash, "edit-edit"));
-				}
+				pendingDownloads.push({ path, remote, before, local, localPathCollision });
 			}
 
 			const previousCount = Object.keys(previous?.entries ?? {}).length;
@@ -1037,24 +1025,145 @@ export class SyncService {
 			};
 			let restored = 0;
 			let deleted = 0;
+			let docsRead = 0;
 			this.applyingRemoteChange = true;
 			try {
-				for (const item of writes) {
-					await this.writeRecordToVault(item.record, item.record.path);
-					await this.localStore.saveFileRecordIfChanged(item.record);
-					state.entries[item.record.path] = toNextcloudStateEntry(item.remote, item.record.contentHash);
-					await this.localStore.saveNextcloudSyncState(state);
-					restored += 1;
+				let writeLock = Promise.resolve();
+				const runWithWriteLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+					const prev = writeLock;
+					let resolveLock!: () => void;
+					writeLock = new Promise<void>((res) => { resolveLock = res; });
+					await prev;
+					try {
+						return await fn();
+					} finally {
+						resolveLock();
+					}
+				};
+
+				const PULL_CONCURRENCY = 3;
+				let downloadIndex = 0;
+				let processedCount = 0;
+
+				const processDownloadTask = async (task: DownloadTask) => {
+					const { path, remote, before, local, localPathCollision } = task;
+					const localHash = local?.contentHash;
+
+					const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
+					docsRead += 1;
+
+					const record = await this.recordFromNextcloudDownload(download);
+
+					if (!before) {
+						if (localPathCollision || (localHash && localHash !== record.contentHash)) {
+							conflicts.push(this.createNextcloudConflict(
+								targetKey,
+								path,
+								local ?? null,
+								remote,
+								record.contentHash,
+								localPathCollision ? "path-collision" : "edit-edit"
+							));
+						} else if (localHash === record.contentHash) {
+							state.entries[path] = toNextcloudStateEntry(remote, record.contentHash);
+							skipped += 1;
+						} else {
+							await runWithWriteLock(async () => {
+								await this.writeRecordToVault(record, record.path);
+								await this.localStore.saveFileRecordIfChanged(record);
+								state.entries[record.path] = toNextcloudStateEntry(remote, record.contentHash);
+								restored += 1;
+							});
+						}
+					} else {
+						const localChanged = localHash !== before.syncedContentHash;
+						if (!local) {
+							conflicts.push(this.createNextcloudConflict(
+								targetKey,
+								path,
+								local ?? null,
+								remote,
+								record.contentHash,
+								localPathCollision ? "path-collision" : "local-delete-remote-edit"
+							));
+						} else if (!localChanged) {
+							await runWithWriteLock(async () => {
+								await this.writeRecordToVault(record, record.path);
+								await this.localStore.saveFileRecordIfChanged(record);
+								state.entries[record.path] = toNextcloudStateEntry(remote, record.contentHash);
+								restored += 1;
+							});
+						} else if (localHash === record.contentHash) {
+							state.entries[path] = toNextcloudStateEntry(remote, record.contentHash);
+							skipped += 1;
+						} else {
+							conflicts.push(this.createNextcloudConflict(
+								targetKey,
+								path,
+								local ?? null,
+								remote,
+								record.contentHash,
+								"edit-edit"
+							));
+						}
+					}
+
+					processedCount += 1;
+					notice.setMessage?.(`Nextcloud: Restoring (${processedCount}/${pendingDownloads.length})...`);
+					this.onStatusChange({
+						state: "restoring",
+						current: processedCount,
+						total: pendingDownloads.length,
+						restored,
+						skipped,
+						conflicts: conflicts.length
+					});
+				};
+
+				if (pendingDownloads.length > 0) {
+					this.onStatusChange({
+						state: "restoring",
+						current: 0,
+						total: pendingDownloads.length,
+						restored: 0,
+						skipped,
+						conflicts: conflicts.length
+					});
 				}
+
+				const workers: Promise<void>[] = [];
+				for (let i = 0; i < Math.min(PULL_CONCURRENCY, pendingDownloads.length); i++) {
+					workers.push((async () => {
+						while (downloadIndex < pendingDownloads.length) {
+							const task = pendingDownloads[downloadIndex++];
+							if (task) {
+								await processDownloadTask(task);
+							}
+						}
+					})());
+				}
+				await Promise.all(workers);
+
+				let deleteIndex = 0;
 				for (const path of deletions) {
+					deleteIndex += 1;
+					notice.setMessage?.(`Nextcloud: Deleting (${deleteIndex}/${deletions.length})...`);
+					this.onStatusChange({
+						state: "deleting",
+						current: deleteIndex,
+						total: deletions.length,
+						deleted,
+						skipped,
+						conflicts: conflicts.length
+					});
 					await this.deleteLocalFile(path);
 					await this.localStore.deleteFileRecordByPath(path);
 					delete state.entries[path];
-					await this.localStore.saveNextcloudSyncState(state);
 					deleted += 1;
 				}
 			} finally {
 				this.applyingRemoteChange = false;
+				await this.localStore.saveNextcloudSyncState(state);
 			}
 
 			for (const conflict of conflicts) await this.conflictStore.upsertConflict(conflict);
@@ -1162,7 +1271,7 @@ export class SyncService {
 			});
 
 			const supportsSnapshots = typeof (this.localStore as Partial<PouchDbFileStore>).getNextcloudSyncState === "function"
-				&& typeof (this.nextcloudService as Partial<NextcloudService>).listFiles === "function";
+				&& typeof (this.nextcloudService as Partial<NextcloudService>).uploadFile === "function";
 			const result = supportsSnapshots
 				? await this.pushNextcloudWithSnapshot(connection, targetKey, records, deletedPaths)
 				: await this.nextcloudService.pushChanges(
@@ -1234,21 +1343,29 @@ export class SyncService {
 		}
 	}
 
-	private async refreshLocalIndexBeforeNextcloudPull() {
+	private async refreshLocalIndexBeforeNextcloudPull(notice?: Notice) {
+		notice?.setMessage?.("Nextcloud: Indexing local files...");
 		const result = await this.syncLocalFiles();
 		const indexedRecords = await this.localStore.listFileRecords({ attachments: false });
+		const localRecordsByPath = new Map<string, VaultFileRecord>();
 		let removed = 0;
 		for (const record of indexedRecords) {
 			if (
 				this.isSupportedNextcloudPath(record.path)
 				&& !this.conflictedPaths.has(record.path)
-				&& !(await this.localPathExists(record.path))
 			) {
-				await this.localStore.deleteFileRecordByPath(record.path);
-				removed += 1;
+				if (!(await this.localPathExists(record.path))) {
+					await this.localStore.deleteFileRecordByPath(record.path);
+					removed += 1;
+				} else {
+					localRecordsByPath.set(record.path, record);
+				}
 			}
 		}
-		return { ...result, total: result.total + removed, saved: result.saved + removed };
+		return {
+			result: { ...result, total: result.total + removed, saved: result.saved + removed },
+			localRecordsByPath
+		};
 	}
 
 	private async pushNextcloudWithSnapshot(
@@ -1259,18 +1376,12 @@ export class SyncService {
 	) {
 		let state = await this.localStore.getNextcloudSyncState(targetKey);
 		if (!state) {
-			const inventory = await this.nextcloudService.listFiles(connection);
-			const relevant = inventory.filter((file) => this.isSupportedNextcloudPath(file.path));
-			if (relevant.length > 0) {
-				throw new Error("Nextcloud already contains syncable files. Run Pull from remote before pushing.");
-			}
 			state = {
 				type: "mysync-nextcloud-sync-state",
 				targetKey,
 				initializedAt: new Date().toISOString(),
 				entries: {}
 			};
-			await this.localStore.saveNextcloudSyncState(state);
 		}
 
 		let uploaded = 0;
@@ -1280,96 +1391,97 @@ export class SyncService {
 		let conflicts = 0;
 		const total = records.length + deletedPaths.length;
 		let current = 0;
-		for (const record of records) {
-			current += 1;
-			if (!this.isSupportedNextcloudPath(record.path) || this.conflictedPaths.has(record.path)) {
-				skipped += 1;
-				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
-				continue;
-			}
-			const before = state.entries[record.path];
-			if (before?.syncedContentHash === record.contentHash) {
-				skipped += 1;
-				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
-				continue;
-			}
-			try {
-				const upload = await getNextcloudUpload(record);
-				const metadata = await this.nextcloudService.uploadFile(
-					connection,
-					record.path,
-					upload.content,
-					upload.contentType,
-					before ? { ifMatch: before.etag } : { ifNoneMatch: "*" }
-				);
-				state.entries[record.path] = toNextcloudStateEntry(metadata, record.contentHash);
-				await this.localStore.saveNextcloudSyncState(state);
-				uploaded += 1;
-			} catch (error) {
-				if (isPreconditionFailure(error)) {
-					const converged = await this.remoteContentMatches(connection, record.path, record.contentHash);
-					if (converged) {
-						state.entries[record.path] = toNextcloudStateEntry(converged, record.contentHash);
-						await this.localStore.saveNextcloudSyncState(state);
-						uploaded += 1;
-					} else {
-						const remote = await this.getNextcloudMetadataIfExists(connection, record.path);
-						await this.conflictStore.upsertConflict(this.createNextcloudConflict(
-							targetKey,
-							record.path,
-							record,
-							remote,
-							undefined,
-							remote ? "edit-edit" : "local-edit-remote-delete"
-						));
-						conflicts += 1;
-					}
-				} else {
-					logger.error("Nextcloud upload failed", error, { path: record.path });
-					errors += 1;
+		try {
+			for (const record of records) {
+				current += 1;
+				if (!this.isSupportedNextcloudPath(record.path) || this.conflictedPaths.has(record.path)) {
+					skipped += 1;
+					this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+					continue;
 				}
+				const before = state.entries[record.path];
+				if (before?.syncedContentHash === record.contentHash) {
+					skipped += 1;
+					this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+					continue;
+				}
+				try {
+					const upload = await getNextcloudUpload(record);
+					const metadata = await this.nextcloudService.uploadFile(
+						connection,
+						record.path,
+						upload.content,
+						upload.contentType,
+						before ? { ifMatch: before.etag } : {}
+					);
+					state.entries[record.path] = toNextcloudStateEntry(metadata, record.contentHash);
+					uploaded += 1;
+				} catch (error) {
+					if (isPreconditionFailure(error)) {
+						const converged = await this.remoteContentMatches(connection, record.path, record.contentHash);
+						if (converged) {
+							state.entries[record.path] = toNextcloudStateEntry(converged, record.contentHash);
+							uploaded += 1;
+						} else {
+							const remote = await this.getNextcloudMetadataIfExists(connection, record.path);
+							await this.conflictStore.upsertConflict(this.createNextcloudConflict(
+								targetKey,
+								record.path,
+								record,
+								remote,
+								undefined,
+								remote ? "edit-edit" : "local-edit-remote-delete"
+							));
+							conflicts += 1;
+						}
+					} else {
+						logger.error("Nextcloud upload failed", error, { path: record.path });
+						errors += 1;
+					}
+				}
+				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
 			}
-			this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+
+			for (const path of deletedPaths) {
+				current += 1;
+				const before = state.entries[path];
+				if (!this.isSupportedNextcloudPath(path) || this.conflictedPaths.has(path)) {
+					skipped += 1;
+					this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+					continue;
+				}
+				try {
+					await this.nextcloudService.deleteFile(connection, path, before ? { ifMatch: before.etag } : {});
+					delete state.entries[path];
+					deleted += 1;
+				} catch (error) {
+					if (isPreconditionFailure(error)) {
+						const remote = await this.getNextcloudMetadataIfExists(connection, path);
+						if (!remote) {
+							delete state.entries[path];
+							deleted += 1;
+						} else {
+							await this.conflictStore.upsertConflict(this.createNextcloudConflict(
+								targetKey, path, null, remote, undefined, "local-delete-remote-edit"
+							));
+							conflicts += 1;
+						}
+					} else {
+						logger.error("Nextcloud deletion failed", error, { path });
+						errors += 1;
+					}
+				}
+				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
+			}
+		} finally {
+			if (uploaded > 0 || deleted > 0 || errors === 0) {
+				if (errors === 0) {
+					state.lastCompletedAt = new Date().toISOString();
+				}
+				await this.localStore.saveNextcloudSyncState(state);
+			}
 		}
 
-		for (const path of deletedPaths) {
-			current += 1;
-			const before = state.entries[path];
-			if (!before || !this.isSupportedNextcloudPath(path) || this.conflictedPaths.has(path)) {
-				skipped += 1;
-				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
-				continue;
-			}
-			try {
-				await this.nextcloudService.deleteFile(connection, path, { ifMatch: before.etag });
-				delete state.entries[path];
-				await this.localStore.saveNextcloudSyncState(state);
-				deleted += 1;
-			} catch (error) {
-				if (isPreconditionFailure(error)) {
-					const remote = await this.getNextcloudMetadataIfExists(connection, path);
-					if (!remote) {
-						delete state.entries[path];
-						await this.localStore.saveNextcloudSyncState(state);
-						deleted += 1;
-					} else {
-						await this.conflictStore.upsertConflict(this.createNextcloudConflict(
-							targetKey, path, null, remote, undefined, "local-delete-remote-edit"
-						));
-						conflicts += 1;
-					}
-				} else {
-					logger.error("Nextcloud deletion failed", error, { path });
-					errors += 1;
-				}
-			}
-			this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
-		}
-
-		if (errors === 0) {
-			state.lastCompletedAt = new Date().toISOString();
-			await this.localStore.saveNextcloudSyncState(state);
-		}
 		if (conflicts > 0) await this.refreshActiveConflicts();
 		return { uploaded, deleted, skipped, errors, conflicts };
 	}
