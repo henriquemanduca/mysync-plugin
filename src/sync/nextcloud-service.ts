@@ -1,5 +1,6 @@
 import { requestUrl } from "obsidian";
 import type { VaultFileRecord } from "./types";
+import { validateNextcloudFilePath } from "./nextcloud-path";
 import { Logger } from "../utils/logger";
 
 const logger = new Logger("NextcloudService");
@@ -193,6 +194,18 @@ export class NextcloudService {
 		const total = plan.records.length + plan.deletedPaths.length;
 
 		for (const record of plan.records) {
+			const pathValidation = validateNextcloudFilePath(record.path);
+
+			if (!pathValidation.valid) {
+				logger.warn("Skipped file with an invalid Nextcloud path", undefined, {
+					path: record.path,
+					reasons: pathValidation.reasons
+				});
+				skipped++;
+				onProgress({ current: uploaded + deleted + skipped + errors, total, uploaded, deleted, skipped });
+				continue;
+			}
+
 			const extracted = extractRecordContent(record);
 
 			if (!extracted) {
@@ -227,6 +240,18 @@ export class NextcloudService {
 		}
 
 		for (const path of plan.deletedPaths) {
+			const pathValidation = validateNextcloudFilePath(path);
+
+			if (!pathValidation.valid) {
+				logger.warn("Skipped deletion with an invalid Nextcloud path", undefined, {
+					path,
+					reasons: pathValidation.reasons
+				});
+				skipped++;
+				onProgress({ current: uploaded + deleted + skipped + errors, total, uploaded, deleted, skipped });
+				continue;
+			}
+
 			try {
 				await this.deleteFile(conn, path);
 				deleted += 1;

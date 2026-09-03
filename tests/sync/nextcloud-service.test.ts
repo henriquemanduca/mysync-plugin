@@ -46,6 +46,26 @@ afterEach(() => {
 });
 
 describe("NextcloudService push changes", () => {
+	it("skips uploads and deletions with invalid Nextcloud paths", async () => {
+		const service = new NextcloudService();
+		const onProgress = vi.fn();
+
+		const result = await service.pushChanges(connection, {
+			records: [markdownRecord("Folder/File\nname.md")],
+			deletedPaths: ["Folder/Old\tname.md"]
+		}, onProgress);
+
+		expect(result).toEqual({ uploaded: 0, deleted: 0, skipped: 2, errors: 0 });
+		expect(requestUrlMock).not.toHaveBeenCalled();
+		expect(onProgress).toHaveBeenLastCalledWith({
+			current: 2,
+			total: 2,
+			uploaded: 0,
+			deleted: 0,
+			skipped: 2
+		});
+	});
+
 	it("uploads replacements before deleting their old paths", async () => {
 		requestUrlMock.mockImplementation(async (options) => {
 			if (options.method === "MKCOL") {

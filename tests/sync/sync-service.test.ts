@@ -60,6 +60,8 @@ function createFixture(configDir = ".obsidian") {
 	} as unknown as App;
 	const store = {
 		deleteFileRecordById: vi.fn().mockResolvedValue(undefined),
+		deleteFileRecordsByPathPrefix: vi.fn().mockResolvedValue(undefined),
+		getFileRecordWithAttachments: vi.fn().mockResolvedValue(null),
 		getNextcloudPushCheckpoint: vi.fn().mockResolvedValue(null),
 		listAllFileRecordIds: vi.fn().mockResolvedValue([]),
 		listFileChangesSince: vi.fn().mockResolvedValue({ changes: [], lastSequence: 0 }),
@@ -340,6 +342,7 @@ describe("SyncService configuration synchronization", () => {
 				}]
 			}]);
 		fixture.store.pullFromCouchDb.mockResolvedValue({ docsRead: 1 });
+		fixture.store.getFileRecordWithAttachments.mockResolvedValue(remoteRecord);
 		fixture.adapter.stat.mockResolvedValue(null);
 
 		await fixture.service.pullFromCouchDb();
@@ -786,25 +789,18 @@ describe("SyncService Nextcloud push", () => {
 		);
 	});
 
-	it("creates tombstones for every known file when a folder is deleted", async () => {
+	it("creates tombstones for records under a deleted folder", async () => {
 		const fixture = createFixture();
 		const deletedFolder = new TFolder("Area", [
 			new TFile("Area/one.md"),
 			new TFile("Area/Nested/two.md")
-		]);
-		fixture.store.listFileRecords.mockResolvedValue([
-			markdownRecord("Area/one.md"),
-			markdownRecord("Area/Nested/two.md"),
-			markdownRecord("Other/keep.md")
 		]);
 
 		await fixture.service.handleDeletedFile(
 			deletedFolder as unknown as Parameters<typeof fixture.service.handleDeletedFile>[0]
 		);
 
-		expect(fixture.store.deleteFileRecordById.mock.calls).toEqual([
-			["vault-file:Area/one.md"],
-			["vault-file:Area/Nested/two.md"]
-		]);
+		expect(fixture.store.deleteFileRecordsByPathPrefix)
+			.toHaveBeenCalledWith("Area", expect.any(Set));
 	});
 });
