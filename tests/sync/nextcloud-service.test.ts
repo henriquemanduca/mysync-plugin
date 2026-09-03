@@ -147,7 +147,7 @@ describe("NextcloudService push changes", () => {
 		}));
 	});
 
-	it("keeps the deletion pending when directory cleanup fails", async () => {
+	it("completes the deletion when optional directory cleanup fails", async () => {
 		requestUrlMock.mockImplementation(async (options) => {
 			if (options.method === "PROPFIND") {
 				throw { status: 500 };
@@ -162,7 +162,47 @@ describe("NextcloudService push changes", () => {
 			deletedPaths: ["Area/note.md"]
 		}, vi.fn());
 
+		expect(result).toEqual({ uploaded: 0, deleted: 1, skipped: 0, errors: 0 });
+	});
+
+	it("stops optional directory cleanup when a successful listing has no entries", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "PROPFIND") {
+				return response(207, multistatus());
+			}
+
+			return response(204);
+		});
+		const service = new NextcloudService();
+
+		const result = await service.pushChanges(connection, {
+			records: [],
+			deletedPaths: ["Area/note.md"]
+		}, vi.fn());
+
+		expect(result).toEqual({ uploaded: 0, deleted: 1, skipped: 0, errors: 0 });
+		expect(requestUrlMock.mock.calls.filter(([options]) => options.method === "DELETE"))
+			.toHaveLength(1);
+	});
+
+	it("keeps the deletion pending when deleting the file fails", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "DELETE") {
+				throw { status: 500 };
+			}
+
+			return response(207, multistatus());
+		});
+		const service = new NextcloudService();
+
+		const result = await service.pushChanges(connection, {
+			records: [],
+			deletedPaths: ["Area/note.md"]
+		}, vi.fn());
+
 		expect(result).toEqual({ uploaded: 0, deleted: 0, skipped: 0, errors: 1 });
+		expect(requestUrlMock.mock.calls.filter(([options]) => options.method === "PROPFIND"))
+			.toHaveLength(0);
 	});
 
 	it("encodes every path segment", async () => {

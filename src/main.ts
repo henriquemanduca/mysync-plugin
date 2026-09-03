@@ -490,13 +490,13 @@ function createSyncStatusView(status: SyncStatus, settings: MySyncSettings): Syn
 				const percent = calculatePercent(status.docsWritten, status.totalDocs);
 				return {
 					text: `pushing ${percent}%`,
-					title: `Pushing to remote (${status.docsWritten}/${status.totalDocs})`
+					title: `Processing remote operations (${status.docsWritten}/${status.totalDocs})`
 				};
 			}
 
 			return {
 				text: `pushing ${status.docsWritten}`,
-				title: "Pushing to remote"
+				title: "Processing remote operations"
 			};
 		}
 

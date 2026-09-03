@@ -31,6 +31,9 @@ export interface NextcloudPushPlan {
 	deletedPaths: string[];
 }
 
+type NextcloudDeleteStatus = "deleted" | "missing";
+type NextcloudDirectoryState = "empty" | "not-empty" | "missing" | "unknown";
+
 export class NextcloudService {
 	/**
 	 * Tests the connection to the Nextcloud server via PROPFIND Depth:0.
@@ -161,9 +164,17 @@ export class NextcloudService {
 	async deleteFile(
 		conn: NextcloudConnection,
 		remotePath: string
-	): Promise<void> {
-		await this.deletePath(conn, remotePath);
-		logger.debug("Deleted file from Nextcloud", { path: remotePath });
+	): Promise<NextcloudDeleteStatus> {
+		const status = await this.deletePath(conn, remotePath);
+
+		logger.debug(
+			status === "deleted"
+				? "Deleted file from Nextcloud"
+				: "File already absent from Nextcloud",
+			{ path: remotePath }
+		);
+
+		return status;
 	}
 
 	/**
@@ -218,11 +229,24 @@ export class NextcloudService {
 		for (const path of plan.deletedPaths) {
 			try {
 				await this.deleteFile(conn, path);
-				await this.removeEmptyParentDirectories(conn, path);
 				deleted += 1;
 			} catch (error) {
 				logger.error("Failed to delete file from Nextcloud", error, { path });
 				errors += 1;
+				onProgress({
+					current: uploaded + deleted + skipped + errors,
+					total,
+					uploaded,
+					deleted,
+					skipped
+				});
+				continue;
+			}
+
+			try {
+				await this.removeEmptyParentDirectories(conn, path);
+			} catch (error) {
+				logger.warn("Failed to clean empty Nextcloud directories", error, { path });
 			}
 
 			onProgress({
@@ -255,8 +279,17 @@ export class NextcloudService {
 				return;
 			}
 
-			await this.deletePath(conn, parentPath);
-			logger.debug("Deleted empty directory from Nextcloud", { path: parentPath });
+			if (directoryState === "unknown") {
+				return;
+			}
+
+			const deleteStatus = await this.deletePath(conn, parentPath);
+			logger.debug(
+				deleteStatus === "deleted"
+					? "Deleted empty directory from Nextcloud"
+					: "Empty directory already absent from Nextcloud",
+				{ path: parentPath }
+			);
 			parentPath = getParentPath(parentPath);
 		}
 	}
@@ -264,7 +297,7 @@ export class NextcloudService {
 	private async getDirectoryState(
 		conn: NextcloudConnection,
 		directoryPath: string
-	): Promise<"empty" | "not-empty" | "missing"> {
+	): Promise<NextcloudDirectoryState> {
 		const url = this.buildWebDavUrl(conn, `${directoryPath.replace(/\/+$/g, "")}/`);
 		let result;
 
@@ -293,7 +326,11 @@ export class NextcloudService {
 		const hrefs = extractWebDavHrefs(result.text);
 
 		if (hrefs.length === 0) {
-			throw new Error(`Nextcloud directory listing returned no entries for ${directoryPath}`);
+			logger.warn("Stopped empty directory cleanup because the listing returned no entries", undefined, {
+				path: directoryPath,
+				status: result.status
+			});
+			return "unknown";
 		}
 
 		return hrefs.some((href) => normalizeUrlPath(href, url) !== requestedPath)
@@ -301,7 +338,10 @@ export class NextcloudService {
 			: "empty";
 	}
 
-	private async deletePath(conn: NextcloudConnection, path: string): Promise<void> {
+	private async deletePath(
+		conn: NextcloudConnection,
+		path: string
+	): Promise<NextcloudDeleteStatus> {
 		const url = this.buildWebDavUrl(conn, path);
 
 		try {
@@ -312,17 +352,17 @@ export class NextcloudService {
 			});
 
 			if (result.status === 404) {
-				logger.debug("Path already absent on Nextcloud", { path });
-				return;
+				return "missing";
 			}
 
 			if (result.status < 200 || result.status >= 300) {
 				throw new Error(`Nextcloud deletion failed: HTTP ${result.status}`);
 			}
+
+			return "deleted";
 		} catch (error) {
 			if (getHttpStatus(error) === 404) {
-				logger.debug("Path already absent on Nextcloud", { path });
-				return;
+				return "missing";
 			}
 
 			throw error;
