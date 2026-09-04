@@ -62,7 +62,7 @@ export class PouchDbConflictStore {
 					...conflict,
 					detectedAt: existing.status === "resolved" ? conflict.detectedAt : existing.detectedAt,
 					_rev: existing._rev
-				} as SyncConflict & PouchDB.ExistingDocument);
+				});
 			} catch (error) {
 				if (isPouchNotFound(error)) {
 					await conflictDb.put(conflict);

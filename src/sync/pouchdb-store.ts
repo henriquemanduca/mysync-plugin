@@ -590,7 +590,7 @@ export class PouchDbFileStore {
 				if (state.type !== "mysync-nextcloud-sync-state" || state.targetKey !== targetKey) {
 					return null;
 				}
-				const { _id: ignoredId, _rev: ignoredRev, ...value } = state as NextcloudSyncStateDocument & PouchDB.ExistingDocument;
+				const { _id: ignoredId, _rev: ignoredRev, ...value } = state;
 				void ignoredId;
 				void ignoredRev;
 				return structuredClone(value);

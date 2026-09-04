@@ -140,7 +140,7 @@ export class NextcloudService {
 		const CONCURRENCY = 4;
 		let activeCount = 0;
 		let queueIndex = 0;
-		let firstError: unknown = null;
+		let firstError: Error | null = null;
 
 		await new Promise<void>((resolve, reject) => {
 			const tryNext = () => {
@@ -170,8 +170,8 @@ export class NextcloudService {
 							activeCount--;
 							tryNext();
 						})
-						.catch((err) => {
-							if (!firstError) firstError = err;
+						.catch((err: unknown) => {
+							if (!firstError) firstError = err instanceof Error ? err : new Error(String(err));
 							activeCount--;
 							tryNext();
 						});
@@ -201,7 +201,7 @@ export class NextcloudService {
 		if (responses.length !== 1 || responses[0]?.isCollection || !responses[0]?.etag) {
 			throw new Error(`Nextcloud returned incomplete metadata for ${path}.`);
 		}
-		const item = responses[0]!;
+		const item = responses[0];
 		return {
 			path,
 			etag: item.etag!,
@@ -600,7 +600,7 @@ export class NextcloudService {
 		const url = this.buildWebDavUrl(conn, path);
 
 		try {
-			const result = await this.request({
+			await this.request({
 				url,
 				method: "DELETE",
 				headers: {
@@ -732,7 +732,7 @@ function getParentPath(path: string) {
 
 function extractWebDavHrefs(xml: string) {
 	try {
-		const parsed = new XMLParser({ removeNSPrefix: true, parseTagValue: false }).parse(xml);
+		const parsed: unknown = new XMLParser({ removeNSPrefix: true, parseTagValue: false }).parse(xml);
 		const responses = toArray(asRecord(asRecord(parsed)?.multistatus)?.response);
 		return responses.flatMap((raw) => {
 			const href = asString(asRecord(raw)?.href)?.trim();

@@ -26,13 +26,11 @@ import type {
 import {
 	collectSyncableFilesInFolder,
 	createAdapterFileContentHash,
-	createBinaryContentHash,
 	createFileRecord,
 	createFileRecordFromContent,
 	createFileRecordId,
 	createLocalFileContentHash,
 	createObsidianConfigFileRecord,
-	createTextContentHash,
 	getPathFromFileRecordId,
 	getSyncFolder,
 	getSyncFolderState,
