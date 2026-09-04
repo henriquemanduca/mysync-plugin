@@ -65,7 +65,7 @@ export interface SyncConflictRemoteVariant {
 	lastChangedIso?: string;
 }
 
-export interface SyncConflict {
+interface SyncConflictBase {
 	_id: string;
 	_rev?: string;
 	recordId: string;
@@ -74,8 +74,14 @@ export interface SyncConflict {
 	status: SyncConflictStatus;
 	detectedAt: string;
 	updatedAt: string;
-	observedLeafRevisions: string[];
 	localVariant: SyncConflictLocalVariant;
+	error?: string;
+}
+
+export interface CouchDbSyncConflict extends SyncConflictBase {
+	/** Missing on documents created before backend discrimination was introduced. */
+	backend?: "couchdb";
+	observedLeafRevisions: string[];
 	remoteVariants: SyncConflictRemoteVariant[];
 	resolution?: {
 		strategy: ConflictResolutionStrategy;
@@ -83,5 +89,55 @@ export interface SyncConflict {
 		resolvedDocumentIds: string[];
 		resolvedAt: string;
 	};
-	error?: string;
 }
+
+export interface NextcloudRemoteFileMetadata {
+	path: string;
+	etag: string;
+	lastModified?: string;
+	size: number;
+	contentType?: string;
+}
+
+export interface NextcloudSyncStateEntry extends NextcloudRemoteFileMetadata {
+	syncedContentHash: string;
+}
+
+export interface NextcloudSyncState {
+	type: "mysync-nextcloud-sync-state";
+	targetKey: string;
+	initializedAt: string;
+	lastCompletedAt?: string;
+	entries: Record<string, NextcloudSyncStateEntry>;
+}
+
+export interface NextcloudPendingOperation {
+	action: "upload" | "delete";
+	path: string;
+	ifMatch?: string;
+	ifNoneMatch?: "*";
+	expectedContentHash?: string;
+}
+
+export interface NextcloudSyncConflict extends SyncConflictBase {
+	backend: "nextcloud";
+	targetKey: string;
+	observedLocalContentHash?: string;
+	remote: {
+		exists: boolean;
+		etag?: string;
+		lastModified?: string;
+		size?: number;
+		contentType?: string;
+		contentHash?: string;
+	};
+	pendingOperation?: NextcloudPendingOperation;
+	resolution?: {
+		strategy: ConflictResolutionStrategy;
+		resolvedDocumentIds: string[];
+		resolvedAt: string;
+		copyPath?: string;
+	};
+}
+
+export type SyncConflict = CouchDbSyncConflict | NextcloudSyncConflict;

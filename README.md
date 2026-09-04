@@ -1,40 +1,155 @@
 # MySync
 
-MySync is an Obsidian plugin for syncing vault files through your own CouchDB
-server.
+MySync is an open-source Obsidian plugin designed for seamless, bidirectional synchronization of your vault files through your own self-hosted **Nextcloud** or **Apache CouchDB** server.
 
-It keeps a local PouchDB index of files in your vault, then lets you push that
-local state to CouchDB or pull remote state back into Obsidian. It is intended
-for users who want to run their own sync backend instead of relying on a hosted
-sync provider.
+It gives you full ownership and privacy over your data, combining a fast local PouchDB file index with robust remote synchronization backends.
 
-> [!WARNING]
-> Back up your vault before using it with important notes.
-> Pulling from CouchDB can restore, overwrite, or delete local
-> files based on the remote database state.
+> [!CAUTION]
+> ### ⚠️ Vault Backup & Data Responsibility Disclaimer
+> **While MySync is stable, actively maintained, and built with safety mechanisms (such as conflict detection, conditional writes, and bulk deletion safeguards), the ultimate responsibility for your files and data integrity belongs to you.**
+>
+> Remote synchronization inherently involves reading, updating, restoring, and deleting local and remote files. Always create and maintain regular, independent backups of your Obsidian vault (such as automated snapshots, Git, or external backups) before configuring or running synchronization.
+
+---
+
+## Remote Synchronization Backends
+
+MySync supports two self-hosted backends. You can choose whichever best fits your infrastructure in the plugin settings.
+
+### 1. Nextcloud (Recommended)
+**What is Nextcloud?**  
+[Nextcloud](https://nextcloud.com/) is a leading open-source, self-hosted productivity and cloud storage platform. It stores files natively on your server's filesystem, making them easily accessible through Nextcloud's web interface, desktop sync clients, and mobile apps.
+
+**How MySync works with Nextcloud:**
+- **Native File Storage:** Your notes and attachments are stored directly as standard files and folders inside your chosen Nextcloud directory (e.g., `/Notes`).
+- **Standard WebDAV Protocol:** Synchronization operates over standard HTTP/HTTPS WebDAV (`remote.php/dav/files/{user}/...`), requiring no custom Nextcloud apps or server modifications.
+- **Optimistic Concurrency Control:** MySync uses WebDAV conditional headers (`ETag`, `If-Match`, and `If-None-Match`) to ensure that remote edits made while you were offline or from another device are never silently overwritten.
+- **Safe Merging & Deletion Guardrails:** First-time pulls perform conservative merges, and bulk deletion thresholds prompt for explicit user confirmation before removing files locally.
+
+### 2. Apache CouchDB
+**What is CouchDB?**  
+[Apache CouchDB](https://couchdb.apache.org/) is a battle-tested, open-source document-oriented NoSQL database. It is renowned for its Multi-Version Concurrency Control (MVCC) and revision trees (`_rev`), making it an industry benchmark for offline-first replication.
+
+**How MySync works with CouchDB:**
+- **Document & Attachment Indexing:** Files and configurations are serialized into JSON documents with binary attachments.
+- **PouchDB Synchronization:** MySync leverages local in-browser PouchDB instances inside Obsidian that replicate directly with your remote CouchDB server using the standard CouchDB replication protocol.
+- **Revision History:** Conflicted changes are tracked natively through CouchDB revision branches, allowing fine-grained resolution between competing file versions.
+
+---
 
 ## Features
 
-- Sync the full vault or a custom folder inside the vault.
-- Sync top-level Obsidian configuration files using the vault's configured
-  configuration directory.
-- Track Markdown files, PDFs, and common image formats.
-- Push local vault changes to a CouchDB database.
-- Pull remote CouchDB changes back into the vault.
-- Test the remote CouchDB connection from Obsidian.
-- Show sync progress and last push time in the Obsidian status bar.
-- Optionally run a sync when Obsidian loads the plugin.
+- **Choice of Backend:** Seamlessly sync to either **Nextcloud** (via WebDAV) or **Apache CouchDB** (via replication).
+- **Flexible Scope:** Sync your entire vault or restrict sync to a designated subfolder.
+- **Obsidian Configuration Sync:** Optionally synchronize top-level Obsidian configuration files (`app.json`, `hotkeys.json`, `workspace.json`), while safely excluding credentials and plugin caches.
+- **Supported File Types:** Full support for Markdown (`.md`), PDFs (`.pdf`), and standard image formats (`.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`).
+- **Conflict Management:** Built-in interactive conflict resolver modal to inspect and resolve conflicting edits side-by-side (keep local, keep remote, or keep both).
+- **Deletion Safeguards:** Interactive confirmation prompts before applying significant remote deletions.
+- **Empty Folder Cleanup:** Dedicated utility command to safely prune empty folder hierarchies.
+- **Status Bar & UI Indicators:** Real-time visibility into sync status, pending uploads, conflict counts, and last sync timestamps.
 
-## Requirements
+---
 
-- Obsidian `1.12.7` or newer.
-- A CouchDB database that already exists.
-- A CouchDB user with access to that database.
-- Node.js `22.22.0` or newer for development builds.
+## Configuration Manual
 
-MySync does not create the remote CouchDB database for you. Create the database
-first, then configure its URL, database name, username, and password in the
-plugin settings.
+Open Obsidian **Settings -> MySync** to access all plugin options:
+
+### Local Configuration
+- **Folder source:** Choose between syncing the entire vault (**Use Obsidian vault root**) or a specific subfolder (**Set a custom folder**).
+- **Custom sync folder:** When custom mode is selected, specify the relative vault path to sync (e.g., `Projects/MySync`).
+- **Sync Obsidian configuration:** Toggle whether to synchronize top-level files in your `.obsidian/` folder (`app.json`, `hotkeys.json`, `workspace.json`). Plugin binaries and credentials are automatically excluded.
+- **Obsidian configuration folder:** Displays the active configuration folder path reported by Obsidian (read-only).
+- **Log level:** Sets the logging verbosity written to `mysync.log` and the developer console (`Debug`, `Log`, `Info`, `Warnings`, `Errors`, `Off`).
+- **Timestamps:** Displays read-only execution times for **Last sync now**, **Last push to remote**, and **Last pull from remote**.
+- **Local file & conflict database IDs:** Read-only identifiers for the local PouchDB databases scoped to this vault.
+
+### Local Data Management
+- **Reset local databases:** Destructive utility button that clears the local PouchDB index, revision trees, conflict history, and sync checkpoints without modifying or deleting your actual vault files or remote data. Use this if the local index becomes corrupt or out of sync.
+- **Last local database reset:** Displays the timestamp of the most recent local database reset.
+
+### Remote Backend Configuration
+
+#### Configuring Nextcloud
+Select **Nextcloud** under *Remote synchronization backend*:
+- **Nextcloud URL:** The base URL of your Nextcloud instance (e.g., `https://cloud.example.com`).
+- **Nextcloud username:** Your Nextcloud account username.
+- **Nextcloud App Password:** A dedicated app password created in Nextcloud (**Settings -> Security -> Devices & credentials**). *Never use your primary account password.*
+- **Nextcloud Remote Path:** The folder path in Nextcloud where notes should be stored (e.g., `/Notes` or `/Obsidian`). The directory must already exist on Nextcloud.
+
+#### Configuring CouchDB
+Select **CouchDB** under *Remote synchronization backend*:
+- **CouchDB URL:** The base URL of your CouchDB instance (e.g., `https://couchdb.example.com` or `http://localhost:5984`).
+- **CouchDB database:** The target database name (defaults to `mysync`). The database must already exist.
+- **CouchDB username:** CouchDB authentication username for basic auth.
+- **CouchDB password:** CouchDB authentication password for basic auth.
+
+---
+
+## Shortcuts, Commands & UI Controls
+
+MySync integrates directly into Obsidian's Command Palette, Ribbon, and Status Bar.
+
+### Command Palette (`Ctrl+P` / `Cmd+P`)
+All commands can be bound to custom keyboard shortcuts via **Obsidian Settings -> Hotkeys**:
+
+| Command | Description |
+| :--- | :--- |
+| **MySync: Push to remote** | Scans local changes and pushes all safe modifications to the remote backend. |
+| **MySync: Push pending files to remote** | Pushes only queued and pending file changes to the remote backend. |
+| **MySync: Pull from remote** | Fetches remote changes, reconciles with the local baseline, and safely applies non-conflicting updates. |
+| **MySync: Sync now** | Performs an immediate local scan and updates the internal PouchDB database index. |
+| **MySync: Resolve sync conflicts** | Opens the interactive conflict resolution modal to view and resolve any conflicting files. |
+| **MySync: Clean empty folders** | Scans the vault for empty folders and allows selective or batch removal. |
+| **MySync: Test remote connection** | Validates credentials and checks connectivity to the configured remote backend. |
+
+### Ribbon Icons (Left Sidebar)
+- **Database Backup Icon (`database-backup`):** Triggers **Sync local to remote** (pushes local changes to remote backend).
+- **File Upload Icon (`file-up`):** Triggers **Push pending files to remote**.
+
+### Status Bar (Bottom Right)
+- **Status Information:** Displays current state (idle, syncing, pushing, pulling, pending changes count, or error messages).
+- **Last Sync Time:** Shows timestamp of the last successful push when idle.
+- **Interactive Conflict Alert:** If conflicts exist, the status bar displays the active conflict count. Clicking anywhere on the MySync status bar item immediately opens the **Resolve sync conflicts** modal.
+
+---
+
+## Conflict Handling & Synchronization Rules
+
+1. **Simultaneous Edits:** If a file was modified both locally and remotely since the last sync baseline, MySync flags it as a conflict. It will never overwrite your local changes silently.
+2. **Conflict Resolution Modal:** You can inspect conflicts and choose to:
+   - **Keep Local:** Overwrites the remote file with your local version.
+   - **Keep Remote:** Replaces your local file with the remote version.
+   - **Keep Both:** Retains both versions, renaming the remote copy with a conflict suffix.
+3. **First-Time Sync:**
+   - On an existing remote backend, always run **Pull from remote** first to establish an accurate baseline before pushing.
+   - Pushing to a non-empty remote without a baseline is prevented to protect existing remote content.
+
+---
+
+## Safety Notes And Limitations
+
+- **Vault Backups:** Always maintain external backups of your notes before syncing.
+- **File Types:** Only `.md`, `.pdf`, supported images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`), and enabled top-level configuration files are synced. Other files are skipped.
+- **Configuration Scoping:** Only top-level configuration files (`app.json`, `hotkeys.json`, `workspace.json`) in your configuration folder are synced. Third-party plugin binaries, themes, and secret files are excluded.
+- **HTTPS Recommended:** Always use HTTPS with valid certificates when connecting to your remote server across networks.
+- **End-to-End Encryption:** MySync does not provide E2EE. Ensure your backend server is properly secured and encrypted at rest if required.
+
+---
+
+## CouchDB Setup Helper
+
+This repository includes `.env.sample` and `setup_couchdb.sh` to assist with CouchDB initialization:
+
+1. Copy `.env.sample` to `.env` and adjust the variables.
+2. Ensure CouchDB is running and create your database.
+3. Run the helper script:
+   ```sh
+   ./setup_couchdb.sh
+   ```
+
+A Docker Compose reference setup is also available in [`examples/couchdb/`](examples/couchdb/).
+
+---
 
 ## Installation
 
@@ -56,122 +171,11 @@ styles.css
 
 Reload Obsidian, open **Settings -> Community plugins**, and enable **MySync**.
 
-## Configuration
-
-Open **Settings -> MySync** in Obsidian.
-
-### Local Configuration
-
-- **Local vault ID**: automatically generated identifier for this vault's local
-  PouchDB database.
-- **Folder source**: choose whether to sync the vault root or a custom folder.
-- **Custom sync folder**: folder path inside the vault when custom mode is
-  selected.
-- **Obsidian configuration folder**: read-only path reported by Obsidian.
-  Top-level files in this folder are included even though hidden configuration
-  files are not exposed by the regular Vault file tree.
-- **Last sync now**, **Last push to CouchDB**, and **Last pull from CouchDB**:
-  read-only timestamps for successful operations.
-- **Last local database reset**: read-only timestamp for the most recent
-  successful reset of both local MySync databases.
-- **Reset local databases**: delete the local file index and conflict history
-  without changing vault files or the remote CouchDB database.
-
-### Remote Database
-
-- **CouchDB URL**: base URL for your CouchDB server, for example
-  `https://couchdb.example.com`.
-- **CouchDB database**: database name used for remote sync, defaulting to
-  `mysync`.
-- **CouchDB username**: username for CouchDB basic authentication.
-- **CouchDB password**: password for CouchDB basic authentication.
-
-Use HTTPS for remote servers whenever possible. A dedicated CouchDB user with
-access only to the MySync database is recommended.
-
-## Usage
-
-MySync adds these command palette commands:
-
-- **Sync now**: scan the configured local folder and update the local PouchDB
-  index.
-- **Push to remote**: sync local files into the local PouchDB index, then push
-  changes to CouchDB.
-- **Pull from remote**: pull CouchDB changes into the local PouchDB index, then
-  restore or delete vault files based on the remote state.
-- **Resolve sync conflicts**: open the conflict pop-up and choose whether to keep
-  the local version, the remote version, or both versions.
-- **Test remote connection**: verify that the configured CouchDB database is
-  reachable.
-
-The **Reset local databases** action is available in MySync settings. It removes
-local file records, revision trees, conflicts, baselines, and replication
-checkpoints, then recreates both databases with the same vault-specific names.
-It does not delete or modify files in the vault and does not make requests that
-change the remote CouchDB database.
-
-After a reset, pull before pushing when the configured remote database already
-contains MySync records. The regular push safety check blocks a full push to a
-non-empty remote database until a new remote baseline has been established.
-
-The ribbon icon runs **Push to remote**.
-
-The status bar shows queued local changes, sync progress, push or pull progress,
-operation results, and errors. When idle, it shows the last successful push
-time when available.
-
-## Safety Notes And Limitations
-
-- Back up your vault before first use and before testing pull behavior.
-- MySync has only been tested with `.md`, `.pdf`, and image files so far.
-  Other file types may not sync or restore correctly yet.
-- Remote pull can overwrite existing local files when the remote record differs.
-- Remote pull can also restore or delete top-level Obsidian configuration
-  files. Reload Obsidian after pulling configuration changes.
-- Theme, snippet, and community-plugin subfolders are not copied. This prevents
-  plugin bundles and plugin-owned credential files from being uploaded as
-  Obsidian configuration.
-- Remote deletion handling avoids deleting locally changed files when a conflict
-  is detected, but you should still review important files after sync.
-- Conflicted paths are excluded from automatic local sync and remote push until
-  they are resolved. If a resolution cannot be pushed, reopen the conflict
-  pop-up to retry it.
-- Resetting the local databases permanently removes the local conflict history,
-  revision trees, baselines, and replication checkpoints. Back up important
-  data and review the confirmation before continuing.
-- The local conflict database is created automatically and its name follows the
-  local file database identifier for the current vault.
-- CouchDB hosting, backups, HTTPS, user management, and access control are your
-  responsibility.
-- Credentials are stored in Obsidian plugin data. Do not commit plugin data,
-  `.env`, vault content, or secrets.
-- MySync does not currently provide end-to-end encryption.
-- No automated test framework is configured yet.
-
-## CouchDB Setup Helper
-
-This repository includes `.env.sample` and `setup_couchdb.sh` as optional
-helpers for preparing a CouchDB user and database security settings.
-
-Copy `.env.sample` to `.env`, adjust the values, make sure the database already
-exists, then run:
-
-```sh
-./setup_couchdb.sh
-```
-
-The script uses an admin account to create a plugin user and assign a role to
-the configured database. Review the script before running it against a real
-server.
-
-For local development and testing, an example Docker Compose setup is available
-at [`examples/couchdb/`](examples/couchdb/). It runs a single-node CouchDB
-container with a persistent volume and health check. See
-[`examples/couchdb/README.md`](examples/couchdb/README.md) for instructions.
+---
 
 ## Development
 
-Clone this repository into your vault plugin folder:
+Clone this repository into your vault plugin directory:
 
 ```text
 VaultFolder/.obsidian/plugins/mysync
@@ -183,44 +187,31 @@ Install dependencies:
 npm install
 ```
 
-Run the development watcher:
+Development watch mode:
 
 ```sh
 npm run dev
 ```
 
-Create a production build:
+Build production bundle:
 
 ```sh
 npm run build
 ```
 
-`npm run build` runs TypeScript checks and produces the bundled plugin files in
-`dist/`.
-
-Run the unit tests:
+Run test suite:
 
 ```sh
 npm test
 ```
 
-Use `npm run test:watch` while developing, `npm run test:coverage` to generate
-the coverage report, or `npm run check` to run the production build, test type
-checks, and unit tests together. See [TESTING.md](TESTING.md) for the incremental
-testing roadmap and mock boundaries.
-
-For local Obsidian testing, reload Obsidian after starting the development
-build, then enable the plugin from community plugin settings.
-
-To bump the plugin version, use:
+Deploy build to configured vaults:
 
 ```sh
-npm version patch
+make deploy
 ```
 
-You can also use `minor` or `major`. The version hook updates
-`manifest.json` and `versions.json`. Release tags are generated without a
-`v` prefix so they match the manifest version.
+---
 
 ## License
 

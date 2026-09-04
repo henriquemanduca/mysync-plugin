@@ -14,8 +14,9 @@ Generated files are not source: `dist/` contains the bundled plugin artifacts (`
 - `npm run dev`: watch `src/main.ts` and emit `main.js` for local Obsidian testing.
 - `npm run build`: run TypeScript checks and produce a production bundle.
 - `npm version patch|minor|major`: update `package.json`, then run the configured version hook to sync `manifest.json` and `versions.json`.
+- `make deploy`: deploys the plugin. **Agents must always run this command after finishing an implementation.**
 
-For manual testing, place this repository under `VaultFolder/.obsidian/plugins/mysync`, run `npm run dev`, reload Obsidian, and enable the plugin.
+For manual testing, place this repository under `VaultFolder/.obsidian/plugins/mysync`, run `npm run dev` (or `make deploy`), reload Obsidian, and enable the plugin.
 
 ## Coding Style & Naming Conventions
 

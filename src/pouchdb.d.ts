@@ -86,12 +86,18 @@ declare module "pouchdb" {
 			since?: string | number;
 			style?: "all_docs" | "main_only";
 			include_docs?: boolean;
+			attachments?: boolean;
+			binary?: boolean;
 		}
 
 		interface ChangesResult {
 			id: string;
+			seq: string | number;
 			changes: Array<{ rev: string }>;
 			deleted?: boolean;
+			doc?: ExistingDocument & {
+				_deleted?: boolean;
+			};
 		}
 
 		interface ChangesResponse {
