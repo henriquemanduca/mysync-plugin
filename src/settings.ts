@@ -223,6 +223,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "CouchDB URL",
 						desc: "Base URL for the CouchDB server.",
+						visible: () => this.plugin.settings.remoteBackend === "couchdb",
 						control: {
 							type: "text",
 							key: "couchDbUrl",
@@ -232,6 +233,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "CouchDB database",
 						desc: "Database name used for remote sync.",
+						visible: () => this.plugin.settings.remoteBackend === "couchdb",
 						control: {
 							type: "text",
 							key: "couchDbDatabase",
@@ -241,6 +243,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "CouchDB username",
 						desc: "Username for CouchDB basic authentication.",
+						visible: () => this.plugin.settings.remoteBackend === "couchdb",
 						control: {
 							type: "text",
 							key: "couchDbUsername",
@@ -250,6 +253,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "CouchDB password",
 						desc: "Password for CouchDB basic authentication.",
+						visible: () => this.plugin.settings.remoteBackend === "couchdb",
 						render: (setting) => {
 							setting.addText((text) => {
 								text.inputEl.type = "password";
@@ -266,6 +270,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "Nextcloud URL",
 						desc: "Base URL for the Nextcloud server (e.g., https://cloud.example.com).",
+						visible: () => this.plugin.settings.remoteBackend === "nextcloud",
 						control: {
 							type: "text",
 							key: "nextcloudUrl",
@@ -275,6 +280,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "Nextcloud username",
 						desc: "Username for Nextcloud login.",
+						visible: () => this.plugin.settings.remoteBackend === "nextcloud",
 						control: {
 							type: "text",
 							key: "nextcloudUsername",
@@ -284,6 +290,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "Nextcloud App Password",
 						desc: "Use an App Password generated in your Nextcloud security settings, NOT your main password.",
+						visible: () => this.plugin.settings.remoteBackend === "nextcloud",
 						render: (setting) => {
 							setting.addText((text) => {
 								text.inputEl.type = "password";
@@ -300,6 +307,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 					{
 						name: "Nextcloud Remote Path",
 						desc: "Directory in Nextcloud where files will be synced (e.g., /Notes).",
+						visible: () => this.plugin.settings.remoteBackend === "nextcloud",
 						control: {
 							type: "text",
 							key: "nextcloudRemotePath",
