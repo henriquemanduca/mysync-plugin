@@ -1,6 +1,7 @@
 import { requestUrl } from "obsidian";
 import { XMLParser } from "fast-xml-parser";
 import type { VaultFileRecord } from "./types";
+import { isTextFileRecord } from "./vault-files";
 import { validateNextcloudFilePath } from "./nextcloud-path";
 import { Logger } from "../utils/logger";
 
@@ -688,11 +689,11 @@ export class NextcloudService {
 function extractRecordContent(
 	record: VaultFileRecord
 ): { resolve: () => Promise<{ content: ArrayBuffer | string; contentType: string }> } | null {
-	if (record.fileType === "markdown" && typeof record.content === "string") {
+	if (isTextFileRecord(record)) {
 		return {
 			resolve: async () => ({
 				content: record.content!,
-				contentType: "text/markdown; charset=utf-8"
+				contentType: record.mimeType ?? "text/markdown; charset=utf-8"
 			})
 		};
 	}

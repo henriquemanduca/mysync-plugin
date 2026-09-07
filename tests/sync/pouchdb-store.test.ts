@@ -118,6 +118,43 @@ describe("PouchDbFileStore Nextcloud changes", () => {
 		expect(String(saved._id)).toMatch(/^_local\/mysync-nextcloud-push:/);
 	});
 
+	it("updates a legacy record when its type changes but its hash does not", async () => {
+		const db = pouchState.db as ReturnType<typeof createDatabaseMock>;
+		db.get.mockResolvedValue({
+			_id: "vault-file:Boards/project.canvas",
+			_rev: "1-legacy",
+			type: "vault-file",
+			fileType: "other",
+			fileName: "project.canvas",
+			path: "Boards/project.canvas",
+			size: 2,
+			contentHash: "same-hash",
+			lastChanged: 100,
+			lastChangedIso: new Date(100).toISOString()
+		});
+		const store = new PouchDbFileStore("test-db");
+
+		await expect(store.saveFileRecordIfChanged({
+			_id: "vault-file:Boards/project.canvas",
+			type: "vault-file",
+			fileType: "text",
+			fileName: "project.canvas",
+			path: "Boards/project.canvas",
+			mimeType: "application/json; charset=utf-8",
+			size: 2,
+			contentHash: "same-hash",
+			content: "{}",
+			lastChanged: 100,
+			lastChangedIso: new Date(100).toISOString()
+		})).resolves.toBe(true);
+
+		expect(db.put).toHaveBeenCalledWith(expect.objectContaining({
+			_rev: "1-legacy",
+			fileType: "text",
+			content: "{}"
+		}));
+	});
+
 	it("persists a credential-free sync snapshot isolated by target key", async () => {
 		const db = pouchState.db as ReturnType<typeof createDatabaseMock>;
 		db.get.mockRejectedValueOnce({ status: 404 });

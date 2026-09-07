@@ -135,7 +135,12 @@ export class PouchDbFileStore {
 			try {
 				const existing = await locaDB.get(record._id);
 
-				if (existing.contentHash === record.contentHash) {
+				if (
+					existing.contentHash === record.contentHash
+					&& existing.fileType === record.fileType
+					&& existing.mimeType === record.mimeType
+					&& (typeof existing.content === "string") === (typeof record.content === "string")
+				) {
 					return false;
 				}
 

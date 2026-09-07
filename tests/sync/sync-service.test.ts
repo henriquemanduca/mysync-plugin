@@ -53,6 +53,7 @@ function createFixture(
 		cachedRead: vi.fn(),
 		create: vi.fn().mockResolvedValue(undefined),
 		createBinary: vi.fn().mockResolvedValue(undefined),
+		createFolder: vi.fn().mockResolvedValue(undefined),
 		configDir,
 		getAbstractFileByPath: vi.fn().mockReturnValue(null),
 		getRoot: vi.fn().mockReturnValue(root),
@@ -150,6 +151,24 @@ function markdownRecord(path: string, content = "hello"): VaultFileRecord {
 		path,
 		size: content.length,
 		contentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		content,
+		lastChanged: 100,
+		lastChangedIso: new Date(100).toISOString()
+	};
+}
+
+function textRecord(path: string, content = "{}"): VaultFileRecord {
+	return {
+		_id: `vault-file:${path}`,
+		type: "vault-file",
+		fileType: "text",
+		fileName: path.slice(path.lastIndexOf("/") + 1),
+		path,
+		mimeType: path.endsWith(".canvas")
+			? "application/json; charset=utf-8"
+			: "application/yaml; charset=utf-8",
+		size: content.length,
+		contentHash: "hash",
 		content,
 		lastChanged: 100,
 		lastChangedIso: new Date(100).toISOString()
@@ -488,6 +507,72 @@ describe("SyncService configuration synchronization", () => {
 		await fixture.service.pullFromCouchDb();
 
 		expect(fixture.adapter.writeBinary).not.toHaveBeenCalled();
+	});
+});
+
+describe("SyncService supported vault files", () => {
+	beforeEach(() => Logger.setLevel("off"));
+	afterEach(() => Logger.setLevel("debug"));
+
+	it("indexes native text files and removes legacy unsupported records", async () => {
+		const fixture = createFixture();
+		const canvas = new TFile("Boards/project.canvas", 2, 100);
+		const unsupported = new TFile("Notes/plain.txt", 4, 100);
+		configureVaultTree(fixture, new TFolder("/", [canvas, unsupported]));
+		fixture.vault.cachedRead.mockResolvedValue("{}");
+		fixture.store.listFileRecords.mockResolvedValue([{
+			_id: "vault-file:Notes/plain.txt",
+			type: "vault-file",
+			fileType: "other",
+			fileName: "plain.txt",
+			path: "Notes/plain.txt",
+			size: 4,
+			contentHash: "legacy",
+			lastChanged: 100,
+			lastChangedIso: new Date(100).toISOString()
+		}]);
+
+		await fixture.service.syncNow();
+
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(expect.objectContaining({
+			path: "Boards/project.canvas",
+			fileType: "text",
+			content: "{}"
+		}));
+		expect(fixture.store.saveFileRecordIfChanged).not.toHaveBeenCalledWith(
+			expect.objectContaining({ path: "Notes/plain.txt" })
+		);
+		expect(fixture.store.deleteFileRecordById).toHaveBeenCalledWith("vault-file:Notes/plain.txt");
+	});
+
+	it("restores downloaded Base files through the text Vault API", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const remote = {
+			path: "Databases/tasks.base",
+			etag: "\"one\"",
+			size: 11,
+			contentType: "application/yaml"
+		};
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles: vi.fn().mockResolvedValue([remote]),
+			downloadFile: vi.fn().mockResolvedValue({
+				...remote,
+				content: arrayBuffer("filters:\r\n[]")
+			})
+		};
+
+		await fixture.service.pullFromRemote();
+
+		expect(fixture.vault.create).toHaveBeenCalledWith("Databases/tasks.base", "filters:\n[]");
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(expect.objectContaining({
+			path: "Databases/tasks.base",
+			fileType: "text",
+			mimeType: "application/yaml; charset=utf-8"
+		}));
 	});
 });
 
@@ -989,6 +1074,79 @@ describe("SyncService Nextcloud push", () => {
 		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalledWith(expect.any(String), 6);
 	});
 
+	it("repairs legacy native-text records before a pending push", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		const canvas = new TFile("Area/project.canvas", 2, 100);
+		configureVaultTree(fixture, new TFolder("/", [canvas]));
+		fixture.vault.cachedRead.mockResolvedValue("{}");
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(5);
+		fixture.store.getNextcloudSyncState.mockResolvedValue(null);
+		const legacyRecord = {
+			_id: "vault-file:Area/project.canvas",
+			_rev: "1-legacy",
+			type: "vault-file" as const,
+			fileType: "other" as const,
+			fileName: "project.canvas",
+			path: "Area/project.canvas",
+			size: 2,
+			contentHash: "legacy-hash",
+			lastChanged: 100,
+			lastChangedIso: new Date(100).toISOString()
+		};
+		const repairedRecord = { ...textRecord("Area/project.canvas"), _rev: "2-repaired" };
+		fixture.store.listFileChangesSince
+			.mockResolvedValueOnce({
+				changes: [{
+					recordId: legacyRecord._id,
+					path: legacyRecord.path,
+					deleted: false,
+					record: legacyRecord
+				}],
+				lastSequence: 6
+			})
+			.mockResolvedValueOnce({
+				changes: [{
+					recordId: repairedRecord._id,
+					path: repairedRecord.path,
+					deleted: false,
+					record: repairedRecord
+				}],
+				lastSequence: 7
+			});
+		const uploadFile = vi.fn().mockResolvedValue({
+			path: repairedRecord.path,
+			etag: "\"v2\"",
+			size: 2,
+			contentType: repairedRecord.mimeType
+		});
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			listFiles: vi.fn(),
+			uploadFile,
+			deleteFile: vi.fn()
+		};
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(fixture.store.saveFileRecordIfChanged).toHaveBeenCalledWith(expect.objectContaining({
+			path: "Area/project.canvas",
+			fileType: "text",
+			content: "{}"
+		}));
+		expect(fixture.store.listFileChangesSince).toHaveBeenCalledTimes(2);
+		expect(uploadFile).toHaveBeenCalledWith(
+			expect.any(Object),
+			"Area/project.canvas",
+			"{}",
+			"application/json; charset=utf-8",
+			{}
+		);
+		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalledWith(expect.any(String), 7);
+	});
+
 	it("pushes only changes after the checkpoint during a pending push", async () => {
 		const fixture = createFixture();
 		const pushChanges = configureNextcloud(fixture);
@@ -1069,7 +1227,12 @@ describe("SyncService Nextcloud push", () => {
 		configureVaultTree(fixture, new TFolder("/", [syncFolder]));
 		fixture.settings.syncFolderMode = "custom";
 		fixture.settings.customSyncFolder = "Sync";
-		fixture.store.listFileRecords.mockResolvedValue([insideRecord, outsideRecord]);
+		fixture.store.listFileRecords.mockResolvedValue([
+			insideRecord,
+			outsideRecord,
+			textRecord("Sync/board.canvas"),
+			{ ...insideRecord, _id: "vault-file:Sync/plain.txt", path: "Sync/plain.txt", fileName: "plain.txt", fileType: "other", content: undefined }
+		]);
 		fixture.store.listFileChangesSince.mockResolvedValue({
 			changes: [{
 				recordId: "vault-file:Sync/deleted.md",
@@ -1078,6 +1241,10 @@ describe("SyncService Nextcloud push", () => {
 			}, {
 				recordId: "vault-file:Private/deleted.md",
 				path: "Private/deleted.md",
+				deleted: true
+			}, {
+				recordId: "vault-file:Sync/deleted.txt",
+				path: "Sync/deleted.txt",
 				deleted: true
 			}],
 			lastSequence: 9
@@ -1089,7 +1256,7 @@ describe("SyncService Nextcloud push", () => {
 		expect(pushChanges).toHaveBeenCalledWith(
 			expect.any(Object),
 			{
-				records: [insideRecord],
+				records: [insideRecord, textRecord("Sync/board.canvas")],
 				deletedPaths: ["Sync/deleted.md"]
 			},
 			expect.any(Function)

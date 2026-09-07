@@ -1,4 +1,4 @@
-export type VaultFileType = "markdown" | "image" | "binary" | "other";
+export type VaultFileType = "markdown" | "text" | "image" | "binary" | "other";
 
 export interface VaultFileRecord {
 	_id: string;

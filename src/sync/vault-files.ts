@@ -23,6 +23,10 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
 	tiff: "image/tiff",
 	webp: "image/webp"
 };
+const TEXT_MIME_TYPES: Record<string, string> = {
+	base: "application/yaml; charset=utf-8",
+	canvas: "application/json; charset=utf-8"
+};
 const BINARY_MIME_TYPES: Record<string, string> = {
 	pdf: "application/pdf"
 };
@@ -126,14 +130,17 @@ export function isFileInsideSyncFolder(file: TFile, syncFolder: string) {
 }
 
 export function isSyncableVaultFile(file: TFile) {
-	return !isSyncBlacklistedPath(file.path);
+	return isSupportedSyncFilePath(file.path) && !isSyncBlacklistedPath(file.path);
 }
 
 export function isSupportedSyncFilePath(path: string) {
 	const fileName = path.slice(path.lastIndexOf("/") + 1);
 	const dotIndex = fileName.lastIndexOf(".");
 	const extension = dotIndex > 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
-	return extension === "md" || extension in IMAGE_MIME_TYPES || extension in BINARY_MIME_TYPES;
+	return extension === "md"
+		|| extension in TEXT_MIME_TYPES
+		|| extension in IMAGE_MIME_TYPES
+		|| extension in BINARY_MIME_TYPES;
 }
 
 export function isSyncBlacklistedPath(path: string) {
@@ -153,9 +160,10 @@ export function isPathInsideSyncFolder(path: string, syncFolder: string) {
 
 export async function createFileRecord(app: App, file: TFile): Promise<VaultFileRecord> {
 	const extension = file.extension.toLowerCase();
+	const textMimeType = getTextMimeType(extension);
 	const imageMimeType = getImageMimeType(extension);
-	const mimeType = imageMimeType ?? getBinaryMimeType(extension);
-	const fileType = getVaultFileType(extension, imageMimeType, mimeType);
+	const mimeType = textMimeType ?? imageMimeType ?? getBinaryMimeType(extension);
+	const fileType = getVaultFileType(extension, textMimeType, imageMimeType, mimeType);
 	const fileContent = await readVaultFileContent(app, file, fileType);
 	const record: VaultFileRecord = {
 		_id: createFileRecordId(file.path),
@@ -173,7 +181,7 @@ export async function createFileRecord(app: App, file: TFile): Promise<VaultFile
 		record.mimeType = mimeType;
 	}
 
-	if (fileType === "markdown") {
+	if (isTextVaultFileType(fileType)) {
 		record.content = fileContent.textContent;
 
 	} else if (mimeType && fileContent.binaryContent) {
@@ -239,11 +247,12 @@ export async function createFileRecordFromContent(
 	const fileName = path.slice(path.lastIndexOf("/") + 1);
 	const dotIndex = fileName.lastIndexOf(".");
 	const extension = dotIndex > 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
+	const textMimeType = getTextMimeType(extension);
 	const imageMimeType = getImageMimeType(extension);
-	const knownMimeType = imageMimeType ?? getBinaryMimeType(extension);
+	const knownMimeType = textMimeType ?? imageMimeType ?? getBinaryMimeType(extension);
 	const fileType = source === "obsidian-config"
 		? "binary"
-		: getVaultFileType(extension, imageMimeType, knownMimeType);
+		: getVaultFileType(extension, textMimeType, imageMimeType, knownMimeType);
 	const changed = lastModified ? Date.parse(lastModified) : Date.now();
 	const lastChanged = Number.isFinite(changed) ? changed : Date.now();
 	const record: VaultFileRecord = {
@@ -259,7 +268,7 @@ export async function createFileRecordFromContent(
 		lastChangedIso: new Date(lastChanged).toISOString()
 	};
 
-	if (fileType === "markdown") {
+	if (isTextVaultFileType(fileType)) {
 		let decoded: string;
 		try {
 			decoded = new TextDecoder("utf-8", { fatal: true }).decode(content);
@@ -267,6 +276,9 @@ export async function createFileRecordFromContent(
 			decoded = new TextDecoder("utf-8", { fatal: false }).decode(content);
 		}
 		const text = normalizeTextContent(decoded);
+		if (knownMimeType) {
+			record.mimeType = knownMimeType;
+		}
 		record.content = text;
 		record.contentHash = await createTextContentHash(text);
 		return record;
@@ -330,7 +342,7 @@ function normalizeVaultFolder(folder: string) {
 }
 
 async function readVaultFileContent(app: App, file: TFile, fileType: VaultFileType) {
-	if (fileType === "markdown") {
+	if (isTextVaultFileType(fileType)) {
 		const textContent = normalizeTextContent(await app.vault.cachedRead(file));
 
 		return {
@@ -354,11 +366,16 @@ async function createContentHash(content: ArrayBuffer) {
 
 function getVaultFileType(
 	extension: string,
+	textMimeType: string | undefined,
 	imageMimeType: string | undefined,
 	mimeType: string | undefined
 ): VaultFileType {
 	if (extension === "md") {
 		return "markdown";
+	}
+
+	if (textMimeType) {
+		return "text";
 	}
 
 	if (imageMimeType) {
@@ -370,6 +387,20 @@ function getVaultFileType(
 	}
 
 	return "other";
+}
+
+export function isTextVaultFileType(fileType: VaultFileType) {
+	return fileType === "markdown" || fileType === "text";
+}
+
+export function isTextFileRecord<T extends Pick<VaultFileRecord, "fileType" | "content">>(
+	record: T
+): record is T & { content: string } {
+	return isTextVaultFileType(record.fileType) && typeof record.content === "string";
+}
+
+function getTextMimeType(extension: string) {
+	return TEXT_MIME_TYPES[extension];
 }
 
 function getImageMimeType(extension: string) {
@@ -401,7 +432,7 @@ export async function getRecordContentHash(record: VaultFileRecord) {
 		return record.contentHash;
 	}
 
-	if (record.fileType === "markdown" && typeof record.content === "string") {
+	if (isTextFileRecord(record)) {
 		return createTextContentHash(record.content);
 	}
 

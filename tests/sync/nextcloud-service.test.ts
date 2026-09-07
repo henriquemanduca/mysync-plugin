@@ -58,6 +58,22 @@ function markdownRecord(path: string): VaultFileRecord {
 	};
 }
 
+function textRecord(path: string, content: string, mimeType: string): VaultFileRecord {
+	return {
+		_id: `vault-file:${path}`,
+		type: "vault-file",
+		fileType: "text",
+		fileName: path.slice(path.lastIndexOf("/") + 1),
+		path,
+		mimeType,
+		size: content.length,
+		contentHash: "hash",
+		content,
+		lastChanged: 100,
+		lastChangedIso: new Date(100).toISOString()
+	};
+}
+
 function multistatus(...hrefs: string[]) {
 	return `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${hrefs.map(
 		(href) => `<d:response><d:href>${href}</d:href></d:response>`
@@ -70,6 +86,27 @@ afterEach(() => {
 });
 
 describe("NextcloudService push changes", () => {
+	it.each([
+		["project.canvas", "{}", "application/json; charset=utf-8"],
+		["tasks.base", "filters: []", "application/yaml; charset=utf-8"]
+	])("uploads %s as structured text", async (path, content, mimeType) => {
+		requestUrlMock.mockImplementation(async (options) =>
+			options.method === "MKCOL" ? response(405) : response(204)
+		);
+		const service = new NextcloudService();
+
+		await service.pushChanges(connection, {
+			records: [textRecord(path, content, mimeType)],
+			deletedPaths: []
+		}, vi.fn());
+
+		expect(requestUrlMock).toHaveBeenCalledWith(expect.objectContaining({
+			method: "PUT",
+			headers: expect.objectContaining({ "Content-Type": mimeType }),
+			body: new TextEncoder().encode(content).buffer
+		}));
+	});
+
 	it("skips uploads and deletions with invalid Nextcloud paths", async () => {
 		const service = new NextcloudService();
 		const onProgress = vi.fn();

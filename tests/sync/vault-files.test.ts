@@ -5,12 +5,15 @@ import {
 	collectFilesInFolder,
 	createBinaryContentHash,
 	createFileRecord,
+	createFileRecordFromContent,
 	createFileRecordId,
 	createObsidianConfigFileRecord,
 	createTextContentHash,
 	getPathFromFileRecordId,
 	isObsidianConfigFilePath,
 	isPathInsideSyncFolder,
+	isSupportedSyncFilePath,
+	isSyncableVaultFile,
 	listObsidianConfigFilePaths,
 	normalizeTextContent
 } from "../../src/sync/vault-files";
@@ -63,6 +66,14 @@ describe("vault file paths", () => {
 		expect(collectFilesInFolder(root as unknown as TFolder))
 			.toEqual([first, second]);
 	});
+
+	it("accepts supported native Obsidian files and rejects unknown extensions", () => {
+		expect(isSupportedSyncFilePath("Boards/Project.canvas")).toBe(true);
+		expect(isSupportedSyncFilePath("Databases/Tasks.BASE")).toBe(true);
+		expect(isSupportedSyncFilePath("Notes/plain.txt")).toBe(false);
+		expect(isSyncableVaultFile(new MockTFile("Boards/Project.canvas") as unknown as TFile)).toBe(true);
+		expect(isSyncableVaultFile(new MockTFile("Notes/plain.txt") as unknown as TFile)).toBe(false);
+	});
 });
 
 describe("file content records", () => {
@@ -92,6 +103,40 @@ describe("file content records", () => {
 			content: "content",
 			size: 7
 		});
+	});
+
+	it.each([
+		["Boards/project.canvas", "application/json; charset=utf-8"],
+		["Databases/tasks.base", "application/yaml; charset=utf-8"]
+	])("creates a textual record for %s", async (path, mimeType) => {
+		const { app, vault } = createApp();
+		const file = new MockTFile(path, 12, 1_721_835_000_000);
+		vault.cachedRead.mockResolvedValue("first\r\nsecond");
+
+		const record = await createFileRecord(app, file as unknown as TFile);
+
+		expect(record).toMatchObject({
+			fileType: "text",
+			mimeType,
+			path,
+			content: "first\nsecond"
+		});
+		expect(record._attachments).toBeUndefined();
+	});
+
+	it.each([
+		["Boards/project.canvas", "application/json; charset=utf-8"],
+		["Databases/tasks.base", "application/yaml; charset=utf-8"]
+	])("creates a textual record for a downloaded %s", async (path, mimeType) => {
+		const record = await createFileRecordFromContent(path, arrayBuffer("first\r\nsecond"));
+
+		expect(record).toMatchObject({
+			fileType: "text",
+			mimeType,
+			path,
+			content: "first\nsecond"
+		});
+		expect(record.contentHash).toBe(await createTextContentHash("first\nsecond"));
 	});
 });
 

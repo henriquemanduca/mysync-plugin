@@ -42,7 +42,7 @@ MySync supports two self-hosted backends. You can choose whichever best fits you
 - **Choice of Backend:** Seamlessly sync to either **Nextcloud** (via WebDAV) or **Apache CouchDB** (via replication).
 - **Flexible Scope:** Sync your entire vault or restrict sync to a designated subfolder.
 - **Obsidian Configuration Sync:** Optionally synchronize top-level Obsidian configuration files (`app.json`, `hotkeys.json`, `workspace.json`), while safely excluding credentials and plugin caches.
-- **Supported File Types:** Full support for Markdown (`.md`), PDFs (`.pdf`), and standard image formats (`.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`).
+- **Supported File Types:** Full support for Markdown (`.md`), Canvas (`.canvas`), Bases (`.base`), PDFs (`.pdf`), and image formats (`.avif`, `.bmp`, `.gif`, `.heic`, `.heif`, `.ico`, `.jfif`, `.jpeg`, `.jpg`, `.png`, `.svg`, `.tif`, `.tiff`, `.webp`).
 - **Conflict Management:** Built-in interactive conflict resolver modal to inspect and resolve conflicting edits side-by-side (keep local, keep remote, or keep both).
 - **Deletion Safeguards:** Interactive confirmation prompts before applying significant remote deletions.
 - **Empty Folder Cleanup:** Dedicated utility command to safely prune empty folder hierarchies.
@@ -129,7 +129,7 @@ All commands can be bound to custom keyboard shortcuts via **Obsidian Settings -
 ## Safety Notes And Limitations
 
 - **Vault Backups:** Always maintain external backups of your notes before syncing.
-- **File Types:** Only `.md`, `.pdf`, supported images (`.png`, `.jpg`, `.jpeg`, `.gif`, `.svg`, `.webp`, `.bmp`), and enabled top-level configuration files are synced. Other files are skipped.
+- **File Types:** Only `.md`, `.canvas`, `.base`, `.pdf`, supported images (`.avif`, `.bmp`, `.gif`, `.heic`, `.heif`, `.ico`, `.jfif`, `.jpeg`, `.jpg`, `.png`, `.svg`, `.tif`, `.tiff`, `.webp`), and enabled top-level configuration files are synced. Other files are skipped.
 - **Configuration Scoping:** Only top-level configuration files (`app.json`, `hotkeys.json`, `workspace.json`) in your configuration folder are synced. Third-party plugin binaries, themes, and secret files are excluded.
 - **HTTPS Recommended:** Always use HTTPS with valid certificates when connecting to your remote server across networks.
 - **End-to-End Encryption:** MySync does not provide E2EE. Ensure your backend server is properly secured and encrypted at rest if required.

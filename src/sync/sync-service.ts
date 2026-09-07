@@ -9,6 +9,7 @@ import {
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
+	FileChange,
 	FileRevisionState,
 	PouchDbFileStore
 } from "./pouchdb-store";
@@ -42,7 +43,8 @@ import {
 	isPathInsideSyncFolder,
 	listObsidianConfigFilePaths,
 	getAttachmentArrayBuffer,
-	getRecordContentHash
+	getRecordContentHash,
+	isTextFileRecord
 } from "./vault-files";
 import { Logger } from "../utils/logger";
 import { validateCouchDbSettings, createCouchDbConnection, getPendingPushBlockingState } from "./couchdb-utils";
@@ -737,7 +739,7 @@ export class SyncService {
 			}
 		}
 
-		const isText = record.fileType === "markdown" && typeof record.content === "string";
+		const isText = isTextFileRecord(record);
 
 		if (existing instanceof TFile) {
 			if (isText) {
@@ -943,11 +945,14 @@ export class SyncService {
 			const relevantRemote = remoteInventory.filter((file) => this.isSupportedNextcloudPath(file.path));
 			const skippedUnsupported = remoteInventory.length - relevantRemote.length;
 			const remoteByPath = new Map(relevantRemote.map((file) => [file.path, file]));
+			const previousEntries = Object.fromEntries(
+				Object.entries(previous?.entries ?? {}).filter(([path]) => this.isSupportedNextcloudPath(path))
+			);
 			const allPaths = new Set([
-				...Object.keys(previous?.entries ?? {}),
+				...Object.keys(previousEntries),
 				...remoteByPath.keys()
 			]);
-			const stagedEntries: Record<string, NextcloudSyncStateEntry> = structuredClone(previous?.entries ?? {});
+			const stagedEntries: Record<string, NextcloudSyncStateEntry> = structuredClone(previousEntries);
 			const deletions: string[] = [];
 			const conflicts: NextcloudSyncConflict[] = [];
 
@@ -962,7 +967,7 @@ export class SyncService {
 			let skipped = skippedUnsupported;
 
 			for (const path of Array.from(allPaths).sort()) {
-				const before = previous?.entries[path];
+				const before = previousEntries[path];
 				const remote = remoteByPath.get(path);
 				let local: VaultFileRecord | null = localRecordsByPath.get(path) ?? null;
 				const localPathCollision = !local && (
@@ -999,7 +1004,7 @@ export class SyncService {
 				pendingDownloads.push({ path, remote, before, local, localPathCollision });
 			}
 
-			const previousCount = Object.keys(previous?.entries ?? {}).length;
+			const previousCount = Object.keys(previousEntries).length;
 			const deletionPercentage = previousCount === 0 ? 0 : deletions.length / previousCount;
 			if (deletions.length >= 10 && deletionPercentage >= 0.25) {
 				const confirmed = await this.confirmNextcloudDeletions({
@@ -1248,14 +1253,17 @@ export class SyncService {
 				await this.syncLocalFiles();
 			}
 
-			const changeBatch = await this.localStore.listFileChangesSince(checkpoint ?? 0);
+			let changeBatch = await this.localStore.listFileChangesSince(checkpoint ?? 0);
+			if (pendingChangesOnly && await this.repairPendingNextcloudRecords(changeBatch.changes)) {
+				changeBatch = await this.localStore.listFileChangesSince(checkpoint ?? 0);
+			}
 			const scopedChanges = changeBatch.changes.filter(
-				(change) => this.isPathInsideCurrentSyncScope(change.path)
+				(change) => this.isSupportedNextcloudPath(change.path)
 			);
 			const records = pendingChangesOnly
 				? scopedChanges.flatMap((change) => change.deleted ? [] : [change.record])
 				: (await this.localStore.listFileRecords()).filter(
-					(record) => this.isPathInsideCurrentSyncScope(record.path)
+					(record) => this.isSupportedNextcloudPath(record.path)
 				);
 			const deletedPaths = Array.from(new Set(
 				scopedChanges.flatMap((change) => change.deleted ? [change.path] : [])
@@ -1339,6 +1347,37 @@ export class SyncService {
 				this.refreshQueuedStatus();
 			}
 		}
+	}
+
+	private async repairPendingNextcloudRecords(changes: FileChange[]) {
+		let repaired = false;
+
+		for (const change of changes) {
+			if (
+				change.deleted
+				|| !this.isSupportedNextcloudPath(change.path)
+				|| hasStoredFileContent(change.record)
+			) {
+				continue;
+			}
+
+			const record = await this.createLocalRecord(change.path);
+			if (record) {
+				await this.localStore.saveFileRecordIfChanged(record);
+				logger.info("Reindexed pending file with unavailable stored content", {
+					path: change.path,
+					fileType: record.fileType
+				});
+			} else {
+				await this.localStore.deleteFileRecordByPath(change.path);
+				logger.info("Removed pending record whose local file no longer exists", {
+					path: change.path
+				});
+			}
+			repaired = true;
+		}
+
+		return repaired;
 	}
 
 	private async refreshLocalIndexBeforeNextcloudPull(notice?: Notice) {
@@ -2264,12 +2303,14 @@ export class SyncService {
 		}
 
 		const files = collectSyncableFilesInFolder(syncFolderState.folder);
+		const removedUnsupported = await this.cleanupUnsupportedVaultRecords(syncFolder);
 		logger.info("Local files collected for sync", {
 			syncFolder,
-			total: files.length
+			total: files.length,
+			removedUnsupported
 		});
 
-		let savedCount = 0;
+		let savedCount = removedUnsupported;
 		let skippedCount = 0;
 
 		for (const [index, file] of files.entries()) {
@@ -2294,21 +2335,38 @@ export class SyncService {
 
 			this.onStatusChange({
 				state: "syncing",
-				current: index + 1,
-				total: files.length,
+				current: index + 1 + removedUnsupported,
+				total: files.length + removedUnsupported,
 				saved: savedCount,
 				skipped: skippedCount
 			});
 		}
 
 		const result = await this.syncObsidianConfigurationFiles({
-			total: files.length,
+			total: files.length + removedUnsupported,
 			saved: savedCount,
 			skipped: skippedCount
 		});
 		await this.localStore.markLocalSyncBaseline(syncFolder);
 
 		return result;
+	}
+
+	private async cleanupUnsupportedVaultRecords(syncFolder: string) {
+		const records = await this.localStore.listFileRecords({ attachments: false });
+		const unsupportedRecords = records.filter((record) =>
+			record.source !== "obsidian-config"
+			&& record.fileType === "other"
+			&& isPathInsideSyncFolder(record.path, syncFolder)
+			&& !isSupportedSyncFilePath(record.path)
+			&& !this.conflictedPaths.has(record.path)
+		);
+
+		for (const record of unsupportedRecords) {
+			await this.localStore.deleteFileRecordById(record._id);
+		}
+
+		return unsupportedRecords.length;
 	}
 
 	private async syncObsidianConfigurationFiles(
@@ -2482,7 +2540,7 @@ export class SyncService {
 			return "skipped";
 		}
 
-		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
+		const fileTypeIstext = isTextFileRecord(record);
 		if (fileTypeIstext) {
 			await this.app.vault.create(path, record.content!);
 			return "restored";
@@ -2503,7 +2561,7 @@ export class SyncService {
 	}
 
 	private async overwriteLocalFile(record: VaultFileRecord, existingFile: TFile): Promise<void> {
-		const fileTypeIstext = record.fileType === "markdown" && typeof record.content === "string";
+		const fileTypeIstext = isTextFileRecord(record);
 
 		if (fileTypeIstext) {
 			await this.app.vault.modify(existingFile, record.content!);
@@ -2584,7 +2642,7 @@ export class SyncService {
 			return;
 		}
 
-		if (!isSyncBlacklistedPath(oldPath)) {
+		if (isSupportedSyncFilePath(oldPath) && !isSyncBlacklistedPath(oldPath)) {
 			await this.localStore.deleteFileRecordByPath(oldPath);
 		}
 
@@ -3117,10 +3175,10 @@ function formatNextcloudTarget(connection: NextcloudConnection) {
 }
 
 async function getNextcloudUpload(record: VaultFileRecord) {
-	if (record.fileType === "markdown" && typeof record.content === "string") {
+	if (isTextFileRecord(record)) {
 		return {
 			content: record.content,
-			contentType: "text/markdown; charset=utf-8"
+			contentType: record.mimeType ?? "text/markdown; charset=utf-8"
 		};
 	}
 	const content = await getAttachmentArrayBuffer(record);
@@ -3129,6 +3187,11 @@ async function getNextcloudUpload(record: VaultFileRecord) {
 		content,
 		contentType: record.mimeType ?? "application/octet-stream"
 	};
+}
+
+function hasStoredFileContent(record: VaultFileRecord) {
+	return isTextFileRecord(record)
+		|| typeof record._attachments?.file?.data !== "undefined";
 }
 
 function isHttpUrl(value: string) {
