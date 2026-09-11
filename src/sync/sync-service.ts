@@ -743,7 +743,7 @@ export class SyncService {
 
 		if (existing instanceof TFile) {
 			if (isText) {
-				await this.app.vault.modify(existing, record.content!);
+				await this.app.vault.modify(existing, record.content);
 				return;
 			}
 
@@ -758,7 +758,7 @@ export class SyncService {
 		}
 
 		if (isText) {
-			await this.app.vault.create(path, record.content!);
+			await this.app.vault.create(path, record.content);
 			return;
 		}
 
@@ -2542,7 +2542,7 @@ export class SyncService {
 
 		const fileTypeIstext = isTextFileRecord(record);
 		if (fileTypeIstext) {
-			await this.app.vault.create(path, record.content!);
+			await this.app.vault.create(path, record.content);
 			return "restored";
 		}
 
@@ -2564,7 +2564,7 @@ export class SyncService {
 		const fileTypeIstext = isTextFileRecord(record);
 
 		if (fileTypeIstext) {
-			await this.app.vault.modify(existingFile, record.content!);
+			await this.app.vault.modify(existingFile, record.content);
 
 		} else if (!fileTypeIstext && typeof record._attachments?.file?.data !== "undefined") {
 			const data = await getAttachmentArrayBuffer(record);

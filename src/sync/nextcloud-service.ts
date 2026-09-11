@@ -692,7 +692,7 @@ function extractRecordContent(
 	if (isTextFileRecord(record)) {
 		return {
 			resolve: async () => ({
-				content: record.content!,
+				content: record.content,
 				contentType: record.mimeType ?? "text/markdown; charset=utf-8"
 			})
 		};

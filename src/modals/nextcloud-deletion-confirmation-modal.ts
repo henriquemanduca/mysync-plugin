@@ -1,6 +1,6 @@
 import { Modal, Setting } from "obsidian";
-import type { NextcloudDeletionConfirmation } from "./sync/sync-service";
-import { setDestructiveButton } from "./utils/button";
+import type { NextcloudDeletionConfirmation } from "../sync/sync-service";
+import { setDestructiveButton } from "../utils/button";
 
 export class NextcloudDeletionConfirmationModal extends Modal {
 	private settled = false;

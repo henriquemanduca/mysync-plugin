@@ -1,5 +1,5 @@
 import { Modal, Setting } from "obsidian";
-import { setDestructiveButton } from "./utils/button";
+import { setDestructiveButton } from "../utils/button";
 
 export class LocalDatabaseResetModal extends Modal {
 	private resetting = false;
