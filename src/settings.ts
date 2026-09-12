@@ -4,9 +4,11 @@ import type MySyncPlugin from "./main";
 import { setDestructiveButton } from "./utils/button";
 import { formatDateTime } from "./utils/date-format";
 import type { LoggerLevel } from "./utils/logger";
+import { normalizeOpenCloudSpaceId } from "./sync/opencloud-path";
 
 export type SyncFolderMode = "vault-root" | "custom";
-export type RemoteSyncBackend = "couchdb" | "nextcloud";
+export type RemoteSyncBackend = "couchdb" | "nextcloud" | "opencloud";
+export type OpenCloudAuthType = "app-token" | "bearer";
 
 export interface MySyncSettings {
 	localVaultId: string;
@@ -23,6 +25,13 @@ export interface MySyncSettings {
 	nextcloudUsername: string;
 	nextcloudPassword: string;
 	nextcloudRemotePath: string;
+	opencloudUrl: string;
+	opencloudSpaceId: string;
+	opencloudAuthType: OpenCloudAuthType;
+	opencloudUsername: string;
+	opencloudToken: string;
+	opencloudRemotePath: string;
+	opencloudTusChunkSizeMb: number;
 	logLevel: LoggerLevel;
 	lastSyncNowAt: string;
 	lastRemotePushAt: string;
@@ -45,6 +54,13 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	nextcloudUsername: "",
 	nextcloudPassword: "",
 	nextcloudRemotePath: "/",
+	opencloudUrl: "",
+	opencloudSpaceId: "",
+	opencloudAuthType: "app-token",
+	opencloudUsername: "",
+	opencloudToken: "",
+	opencloudRemotePath: "/",
+	opencloudTusChunkSizeMb: 5,
 	logLevel: "debug",
 	lastSyncNowAt: "",
 	lastRemotePushAt: "",
@@ -57,7 +73,11 @@ function isSyncFolderMode(value: string): value is SyncFolderMode {
 }
 
 export function isRemoteSyncBackend(value: string): value is RemoteSyncBackend {
-	return value === "couchdb" || value === "nextcloud";
+	return value === "couchdb" || value === "nextcloud" || value === "opencloud";
+}
+
+export function isOpenCloudAuthType(value: string): value is OpenCloudAuthType {
+	return value === "app-token" || value === "bearer";
 }
 
 function refreshDomStateIfAvailable(settingTab: PluginSettingTab) {
@@ -216,7 +236,8 @@ export class MySyncSettingTab extends PluginSettingTab {
 							key: "remoteBackend",
 							options: {
 								couchdb: "CouchDB",
-								nextcloud: "Nextcloud"
+								nextcloud: "Nextcloud",
+								opencloud: "OpenCloud"
 							}
 						}
 					},
@@ -313,6 +334,87 @@ export class MySyncSettingTab extends PluginSettingTab {
 							key: "nextcloudRemotePath",
 							placeholder: "/Notes"
 						}
+					},
+					{
+						name: "OpenCloud URL",
+						desc: "Base URL for the OpenCloud server (e.g., https://cloud.example.com).",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						control: {
+							type: "text",
+							key: "opencloudUrl",
+							placeholder: "https://cloud.example.com"
+						}
+					},
+					{
+						name: "OpenCloud Space ID",
+						desc: "Resource ID from the Space WebDAV URL.",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						control: {
+							type: "text",
+							key: "opencloudSpaceId",
+							placeholder: "storage-id$space-id"
+						}
+					},
+					{
+						name: "OpenCloud authentication",
+						desc: "Use an App Token with your username, or an OpenID Connect Bearer Token.",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						control: {
+							type: "dropdown",
+							key: "opencloudAuthType",
+							options: {
+								"app-token": "Username + App Token",
+								bearer: "Bearer Token"
+							}
+						}
+					},
+					{
+						name: "OpenCloud username",
+						desc: "Username or UUID required for App Token authentication.",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud"
+							&& this.plugin.settings.opencloudAuthType === "app-token",
+						control: {
+							type: "text",
+							key: "opencloudUsername",
+							placeholder: "username or UUID"
+						}
+					},
+					{
+						name: "OpenCloud token",
+						desc: "App Token or Bearer Token. The value is stored in Obsidian plugin data.",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						render: (setting) => {
+							setting.addText((text) => {
+								text.inputEl.type = "password";
+								text
+									.setPlaceholder("Token")
+									.setValue(this.plugin.settings.opencloudToken)
+									.onChange(async (value) => {
+										this.plugin.settings.opencloudToken = value;
+										await this.plugin.saveSettings();
+									});
+							});
+						}
+					},
+					{
+						name: "OpenCloud remote path",
+						desc: "Directory inside the selected Space where files will be synchronized.",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						control: {
+							type: "text",
+							key: "opencloudRemotePath",
+							placeholder: "/Notes"
+						}
+					},
+					{
+						name: "OpenCloud TUS chunk size",
+						desc: "Chunk size in MB for resumable uploads (1-10 MB).",
+						visible: () => this.plugin.settings.remoteBackend === "opencloud",
+						control: {
+							type: "text",
+							key: "opencloudTusChunkSizeMb",
+							placeholder: "5"
+						}
 					}
 				]
 			}
@@ -320,6 +422,9 @@ export class MySyncSettingTab extends PluginSettingTab {
 	}
 
 	getControlValue(key: string): unknown {
+		if (key === "opencloudTusChunkSizeMb") {
+			return String(this.plugin.settings.opencloudTusChunkSizeMb);
+		}
 		return this.plugin.settings[key as keyof MySyncSettings];
 	}
 
@@ -343,6 +448,16 @@ export class MySyncSettingTab extends PluginSettingTab {
 					return;
 				}
 				this.plugin.settings.remoteBackend = remoteBackend;
+				await this.plugin.saveSettings();
+				refreshDomStateIfAvailable(this);
+				return;
+			}
+			case "opencloudAuthType": {
+				const authType = String(value);
+				if (!isOpenCloudAuthType(authType)) {
+					return;
+				}
+				this.plugin.settings.opencloudAuthType = authType;
 				await this.plugin.saveSettings();
 				refreshDomStateIfAvailable(this);
 				return;
@@ -371,6 +486,26 @@ export class MySyncSettingTab extends PluginSettingTab {
 			case "nextcloudRemotePath":
 				this.plugin.settings.nextcloudRemotePath = String(value).trim();
 				break;
+			case "opencloudUrl":
+				this.plugin.settings.opencloudUrl = String(value).trim().replace(/\/+$/g, "");
+				break;
+			case "opencloudSpaceId":
+				this.plugin.settings.opencloudSpaceId = normalizeOpenCloudSpaceId(String(value));
+				break;
+			case "opencloudUsername":
+				this.plugin.settings.opencloudUsername = String(value).trim();
+				break;
+			case "opencloudRemotePath":
+				this.plugin.settings.opencloudRemotePath = String(value).trim();
+				break;
+			case "opencloudTusChunkSizeMb": {
+				const chunkSize = Number(value);
+				if (!Number.isInteger(chunkSize) || chunkSize < 1 || chunkSize > 10) {
+					return;
+				}
+				this.plugin.settings.opencloudTusChunkSizeMb = chunkSize;
+				break;
+			}
 			case "logLevel":
 				this.plugin.updateLogLevel(value);
 				break;
@@ -554,6 +689,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 				dropdown
 					.addOption("couchdb", "CouchDB")
 					.addOption("nextcloud", "Nextcloud")
+					.addOption("opencloud", "OpenCloud")
 					.setValue(this.plugin.settings.remoteBackend)
 					.onChange(async (value) => {
 						if (!isRemoteSyncBackend(value)) {
@@ -669,6 +805,105 @@ export class MySyncSettingTab extends PluginSettingTab {
 						.setValue(this.plugin.settings.nextcloudRemotePath)
 						.onChange(async (value) => {
 							this.plugin.settings.nextcloudRemotePath = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+		} else if (this.plugin.settings.remoteBackend === "opencloud") {
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud URL")
+				.setDesc("Base URL for the OpenCloud server (e.g., https://cloud.example.com).")
+				.addText((text) =>
+					text
+						.setPlaceholder("https://cloud.example.com")
+						.setValue(this.plugin.settings.opencloudUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.opencloudUrl = value.trim().replace(/\/+$/g, "");
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud Space ID")
+				.setDesc("Resource ID from the Space WebDAV URL.")
+				.addText((text) =>
+					text
+						.setPlaceholder("storage-id$space-id")
+						.setValue(this.plugin.settings.opencloudSpaceId)
+						.onChange(async (value) => {
+							this.plugin.settings.opencloudSpaceId = normalizeOpenCloudSpaceId(value);
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud authentication")
+				.setDesc("Use an App Token with your username, or an OpenID Connect Bearer Token.")
+				.addDropdown((dropdown) =>
+					dropdown
+						.addOption("app-token", "Username + App Token")
+						.addOption("bearer", "Bearer Token")
+						.setValue(this.plugin.settings.opencloudAuthType)
+						.onChange(async (value) => {
+							if (!isOpenCloudAuthType(value)) return;
+							this.plugin.settings.opencloudAuthType = value;
+							await this.plugin.saveSettings();
+							this.display();
+						})
+				);
+
+			if (this.plugin.settings.opencloudAuthType === "app-token") {
+				new Setting(remoteSectionEl)
+					.setName("OpenCloud username")
+					.setDesc("Username or UUID required for App Token authentication.")
+					.addText((text) =>
+						text
+							.setPlaceholder("username or UUID")
+							.setValue(this.plugin.settings.opencloudUsername)
+							.onChange(async (value) => {
+								this.plugin.settings.opencloudUsername = value.trim();
+								await this.plugin.saveSettings();
+							})
+					);
+			}
+
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud token")
+				.setDesc("App Token or Bearer Token. The value is stored in Obsidian plugin data.")
+				.addText((text) => {
+					text.inputEl.type = "password";
+					text
+						.setPlaceholder("Token")
+						.setValue(this.plugin.settings.opencloudToken)
+						.onChange(async (value) => {
+							this.plugin.settings.opencloudToken = value;
+							await this.plugin.saveSettings();
+						});
+				});
+
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud remote path")
+				.setDesc("Directory inside the selected Space where files will be synchronized.")
+				.addText((text) =>
+					text
+						.setPlaceholder("/Notes")
+						.setValue(this.plugin.settings.opencloudRemotePath)
+						.onChange(async (value) => {
+							this.plugin.settings.opencloudRemotePath = value.trim();
+							await this.plugin.saveSettings();
+						})
+				);
+
+			new Setting(remoteSectionEl)
+				.setName("OpenCloud TUS chunk size")
+				.setDesc("Chunk size in MB for resumable uploads (1-10 MB).")
+				.addText((text) =>
+					text
+						.setPlaceholder("5")
+						.setValue(String(this.plugin.settings.opencloudTusChunkSizeMb))
+						.onChange(async (value) => {
+							const chunkSize = Number(value);
+							if (!Number.isInteger(chunkSize) || chunkSize < 1 || chunkSize > 10) return;
+							this.plugin.settings.opencloudTusChunkSizeMb = chunkSize;
 							await this.plugin.saveSettings();
 						})
 				);

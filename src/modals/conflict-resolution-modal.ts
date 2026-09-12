@@ -115,7 +115,7 @@ export class ConflictResolutionModal extends Modal {
 
 function getConflictActions(conflict: SyncConflict): ConflictAction[] {
 	const hasLocalFile = conflict.localVariant.exists;
-	const hasRemoteFile = conflict.backend === "nextcloud"
+	const hasRemoteFile = "remote" in conflict
 		? conflict.remote.exists
 		: conflict.remoteVariants.some((variant) => !variant.deleted);
 	const actions: ConflictAction[] = [];

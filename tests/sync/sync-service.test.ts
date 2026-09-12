@@ -108,6 +108,13 @@ function createFixture(
 		nextcloudUsername: "",
 		nextcloudPassword: "",
 		nextcloudRemotePath: "/",
+		opencloudUrl: "",
+		opencloudSpaceId: "",
+		opencloudAuthType: "app-token",
+		opencloudUsername: "",
+		opencloudToken: "",
+		opencloudRemotePath: "/",
+		opencloudTusChunkSizeMb: 5,
 		logLevel: "off",
 		lastSyncNowAt: "",
 		lastRemotePushAt: "",
@@ -702,6 +709,74 @@ describe("SyncService Nextcloud pull", () => {
 		expect(statusStates).not.toContain("pulling");
 		expect(statusStates).toContain("restoring");
 		expect(statusStates).toContain("pulled");
+	});
+});
+
+describe("SyncService OpenCloud routing", () => {
+	beforeEach(() => Logger.setLevel("off"));
+	afterEach(() => Logger.setLevel("debug"));
+
+	it("pulls through the dedicated OpenCloud service with Space settings", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "opencloud";
+		fixture.settings.opencloudUrl = "https://opencloud.example.com";
+		fixture.settings.opencloudSpaceId = "storage$personal";
+		fixture.settings.opencloudAuthType = "bearer";
+		fixture.settings.opencloudToken = "access-token";
+		fixture.settings.opencloudRemotePath = "/Notes";
+		const remote = {
+			path: "note.md",
+			etag: "\"one\"",
+			size: 5,
+			contentType: "text/markdown"
+		};
+		const listFiles = vi.fn().mockResolvedValue([remote]);
+		const downloadFile = vi.fn().mockResolvedValue({ ...remote, content: arrayBuffer("hello") });
+		(fixture.service as unknown as { opencloudService: unknown }).opencloudService = {
+			listFiles,
+			downloadFile
+		};
+
+		await fixture.service.pullFromRemote();
+
+		expect(listFiles).toHaveBeenCalledWith(expect.objectContaining({
+			backend: "opencloud",
+			url: "https://opencloud.example.com",
+			spaceId: "storage$personal",
+			authType: "bearer",
+			token: "access-token",
+			remotePath: "/Notes",
+			tusChunkSizeBytes: 5_000_000
+		}));
+		expect(downloadFile).toHaveBeenCalledWith(expect.any(Object), "note.md", "\"one\"");
+		expect(fixture.vault.create).toHaveBeenCalledWith("note.md", "hello");
+		expect(fixture.onOperationCompleted).toHaveBeenCalledWith("remotePull");
+		expect(Notice.instances.at(-1)?.message).toContain("OpenCloud: downloaded 1");
+	});
+
+	it("tests the OpenCloud connection through the dedicated service", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "opencloud";
+		fixture.settings.opencloudUrl = "https://opencloud.example.com";
+		fixture.settings.opencloudSpaceId = "storage$personal";
+		fixture.settings.opencloudAuthType = "app-token";
+		fixture.settings.opencloudUsername = "alice";
+		fixture.settings.opencloudToken = "app-token";
+		const testConnection = vi.fn().mockResolvedValue(undefined);
+		(fixture.service as unknown as { opencloudService: unknown }).opencloudService = {
+			testConnection
+		};
+
+		await fixture.service.testRemoteConnection();
+
+		expect(testConnection).toHaveBeenCalledWith(expect.objectContaining({
+			backend: "opencloud",
+			spaceId: "storage$personal",
+			authType: "app-token",
+			username: "alice",
+			token: "app-token"
+		}));
+		expect(fixture.statuses).toContainEqual({ state: "tested", databaseName: "OpenCloud" });
 	});
 });
 

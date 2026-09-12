@@ -1,7 +1,14 @@
 import { Notice, Plugin } from "obsidian";
-import { DEFAULT_SETTINGS, MySyncSettingTab, type MySyncSettings, isRemoteSyncBackend } from "./settings";
+import {
+	DEFAULT_SETTINGS,
+	MySyncSettingTab,
+	type MySyncSettings,
+	isOpenCloudAuthType,
+	isRemoteSyncBackend
+} from "./settings";
 import { PouchDbFileStore } from "./sync/pouchdb-store";
 import { PouchDbConflictStore } from "./sync/conflict-store";
+import { normalizeOpenCloudSpaceId } from "./sync/opencloud-path";
 import { SyncService, type CompletedSyncOperation, type SyncStatus } from "./sync/sync-service";
 import type { SyncConflict } from "./sync/types";
 import { ConflictResolutionModal } from "./modals/conflict-resolution-modal";
@@ -28,6 +35,11 @@ const STRING_SETTING_KEYS = [
 	"nextcloudUsername",
 	"nextcloudPassword",
 	"nextcloudRemotePath",
+	"opencloudUrl",
+	"opencloudSpaceId",
+	"opencloudUsername",
+	"opencloudToken",
+	"opencloudRemotePath",
 	"lastSyncNowAt",
 	"lastRemotePushAt",
 	"lastRemotePullAt",
@@ -417,6 +429,9 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 		}
 	}
 
+	if (typeof data.opencloudSpaceId === "string") {
+		settings.opencloudSpaceId = normalizeOpenCloudSpaceId(data.opencloudSpaceId);
+	}
 
 	if (typeof data["lastPushToCouchDbAt"] === "string" && !settings.lastRemotePushAt) {
 		settings.lastRemotePushAt = data["lastPushToCouchDbAt"];
@@ -432,6 +447,19 @@ function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 
 	if (typeof data.remoteBackend === "string" && isRemoteSyncBackend(data.remoteBackend)) {
 		settings.remoteBackend = data.remoteBackend;
+	}
+
+	if (typeof data.opencloudAuthType === "string" && isOpenCloudAuthType(data.opencloudAuthType)) {
+		settings.opencloudAuthType = data.opencloudAuthType;
+	}
+
+	if (
+		typeof data.opencloudTusChunkSizeMb === "number"
+		&& Number.isInteger(data.opencloudTusChunkSizeMb)
+		&& data.opencloudTusChunkSizeMb >= 1
+		&& data.opencloudTusChunkSizeMb <= 10
+	) {
+		settings.opencloudTusChunkSizeMb = data.opencloudTusChunkSizeMb;
 	}
 
 	if (typeof data.syncObsidianConfig === "boolean") {

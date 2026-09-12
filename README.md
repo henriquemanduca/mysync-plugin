@@ -1,6 +1,6 @@
 # MySync
 
-MySync is an open-source Obsidian plugin designed for seamless, bidirectional synchronization of your vault files through your own self-hosted **Nextcloud** or **Apache CouchDB** server.
+MySync is an open-source Obsidian plugin designed for seamless, bidirectional synchronization of your vault files through your own self-hosted **Nextcloud**, **OpenCloud**, or **Apache CouchDB** server.
 
 It gives you full ownership and privacy over your data, combining a fast local PouchDB file index with robust remote synchronization backends.
 
@@ -14,7 +14,7 @@ It gives you full ownership and privacy over your data, combining a fast local P
 
 ## Remote Synchronization Backends
 
-MySync supports two self-hosted backends. You can choose whichever best fits your infrastructure in the plugin settings.
+MySync supports three self-hosted backends. You can choose whichever best fits your infrastructure in the plugin settings.
 
 ### 1. Nextcloud (Recommended)
 **What is Nextcloud?**  
@@ -26,7 +26,17 @@ MySync supports two self-hosted backends. You can choose whichever best fits you
 - **Optimistic Concurrency Control:** MySync uses WebDAV conditional headers (`ETag`, `If-Match`, and `If-None-Match`) to ensure that remote edits made while you were offline or from another device are never silently overwritten.
 - **Safe Merging & Deletion Guardrails:** First-time pulls perform conservative merges, and bulk deletion thresholds prompt for explicit user confirmation before removing files locally.
 
-### 2. Apache CouchDB
+### 2. OpenCloud
+**What is OpenCloud?**
+[OpenCloud](https://opencloud.eu/) is a self-hosted file collaboration platform organized around Spaces.
+
+**How MySync works with OpenCloud:**
+- **Space-aware WebDAV:** Inventory, directory creation, downloads, and deletions use `/remote.php/dav/spaces/{space_id}/`.
+- **Resumable uploads:** File uploads use TUS 1.0 with configurable 1-10 MB chunks, offset recovery, and retry backoff.
+- **Flexible authentication:** Both username + App Token and OpenID Connect Bearer Token authentication are supported.
+- **Concurrency safeguards:** MySync validates ETags around downloads and deletions and uses OpenCloud's conditional TUS upload support.
+
+### 3. Apache CouchDB
 **What is CouchDB?**  
 [Apache CouchDB](https://couchdb.apache.org/) is a battle-tested, open-source document-oriented NoSQL database. It is renowned for its Multi-Version Concurrency Control (MVCC) and revision trees (`_rev`), making it an industry benchmark for offline-first replication.
 
@@ -39,7 +49,7 @@ MySync supports two self-hosted backends. You can choose whichever best fits you
 
 ## Features
 
-- **Choice of Backend:** Seamlessly sync to either **Nextcloud** (via WebDAV) or **Apache CouchDB** (via replication).
+- **Choice of Backend:** Sync to **Nextcloud** (WebDAV), **OpenCloud** (Space WebDAV + TUS), or **Apache CouchDB** (replication).
 - **Flexible Scope:** Sync your entire vault or restrict sync to a designated subfolder.
 - **Obsidian Configuration Sync:** Optionally synchronize top-level Obsidian configuration files (`app.json`, `hotkeys.json`, `workspace.json`), while safely excluding credentials and plugin caches.
 - **Supported File Types:** Full support for Markdown (`.md`), Canvas (`.canvas`), Bases (`.base`), PDFs (`.pdf`), and image formats (`.avif`, `.bmp`, `.gif`, `.heic`, `.heif`, `.ico`, `.jfif`, `.jpeg`, `.jpg`, `.png`, `.svg`, `.tif`, `.tiff`, `.webp`).
@@ -75,6 +85,16 @@ Select **Nextcloud** under *Remote synchronization backend*:
 - **Nextcloud username:** Your Nextcloud account username.
 - **Nextcloud App Password:** A dedicated app password created in Nextcloud (**Settings -> Security -> Devices & credentials**). *Never use your primary account password.*
 - **Nextcloud Remote Path:** The folder path in Nextcloud where notes should be stored (e.g., `/Notes` or `/Obsidian`). The directory must already exist on Nextcloud.
+
+#### Configuring OpenCloud
+Select **OpenCloud** under *Remote synchronization backend*:
+- **OpenCloud URL:** The base URL of the OpenCloud instance (e.g., `https://cloud.example.com`).
+- **OpenCloud Space ID:** The resource ID found in the Space WebDAV URL after `/remote.php/dav/spaces/`. Both the raw `$` separator and its URL-encoded `%24` form are accepted and normalized automatically.
+- **OpenCloud authentication:** Choose **Username + App Token** for long-lived application access, or **Bearer Token** for an existing OpenID Connect access token.
+- **OpenCloud username:** Required for App Token authentication. Autoprovisioned identity providers may require the user UUID.
+- **OpenCloud token:** The App Token or Bearer Token. Bearer tokens can expire and must be replaced in settings when they do.
+- **OpenCloud remote path:** The directory inside the selected Space (e.g., `/Notes`). Missing directories are created automatically.
+- **OpenCloud TUS chunk size:** Chunk size from 1 to 10 MB. The default is 5 MB.
 
 #### Configuring CouchDB
 Select **CouchDB** under *Remote synchronization backend*:

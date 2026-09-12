@@ -8,6 +8,7 @@ import { Logger } from "../utils/logger";
 const logger = new Logger("NextcloudService");
 
 export interface NextcloudConnection {
+	backend?: "nextcloud" | "opencloud";
 	url: string;
 	username: string;
 	password: string;
@@ -286,8 +287,8 @@ export class NextcloudService {
 			return;
 		}
 
-		const base = conn.url.replace(/\/+$/, "");
-		const fullCacheKey = `${base}|${combinedPath}`;
+		const endpointKey = this.buildWebDavUrlFromRoot(conn, "");
+		const fullCacheKey = `${endpointKey}|${combinedPath}`;
 		if (this.ensuredDirectories.has(fullCacheKey)) {
 			return;
 		}
@@ -297,13 +298,12 @@ export class NextcloudService {
 
 		for (const segment of segments) {
 			currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-			const segmentCacheKey = `${base}|${currentPath}`;
+			const segmentCacheKey = `${endpointKey}|${currentPath}`;
 			if (this.ensuredDirectories.has(segmentCacheKey)) {
 				continue;
 			}
 			
-			const encodedSegments = currentPath.split("/").map(encodeURIComponent).join("/");
-			const url = `${base}/remote.php/webdav/${encodedSegments}/`;
+			const url = this.buildWebDavUrlFromRoot(conn, `${currentPath}/`);
 
 			try {
 				const result = await requestUrl({
@@ -624,10 +624,9 @@ export class NextcloudService {
 	 * Builds the full WebDAV URL for a given path.
 	 * Example: https://cloud.example.com/remote.php/webdav/Notes/subfolder/file.md
 	 */
-	private buildWebDavUrl(conn: NextcloudConnection, path: string): string {
+	protected buildWebDavUrl(conn: NextcloudConnection, path: string): string {
 		assertValidRemotePath(conn.remotePath);
 		if (path.replace(/^\/+|\/+$/g, "")) assertValidFilePath(path.replace(/^\/+|\/+$/g, ""));
-		const base = conn.url.replace(/\/+$/, "");
 		const remotePath = conn.remotePath.replace(/^\/+|\/+$/g, "");
 		const filePath = path.replace(/^\/+/, "");
 
@@ -643,11 +642,18 @@ export class NextcloudService {
 			segments = "";
 		}
 
-		const encodedSegments = segments.split("/").map(encodeURIComponent).join("/");
-		return `${base}/remote.php/webdav/${encodedSegments}`;
+		return this.buildWebDavUrlFromRoot(conn, segments);
 	}
 
-	private buildAuthHeaders(conn: NextcloudConnection): Record<string, string> {
+	protected buildWebDavUrlFromRoot(conn: NextcloudConnection, path: string): string {
+		const base = conn.url.replace(/\/+$/, "");
+		const trailingSlash = path.endsWith("/") ? "/" : "";
+		const normalized = path.replace(/^\/+|\/+$/g, "");
+		const encodedSegments = normalized.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+		return `${base}/remote.php/webdav/${encodedSegments}${trailingSlash}`;
+	}
+
+	protected buildAuthHeaders(conn: NextcloudConnection): Record<string, string> {
 		const token = btoa(`${conn.username}:${conn.password}`);
 
 		return {

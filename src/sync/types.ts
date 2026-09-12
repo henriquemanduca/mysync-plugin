@@ -120,7 +120,7 @@ export interface NextcloudPendingOperation {
 }
 
 export interface NextcloudSyncConflict extends SyncConflictBase {
-	backend: "nextcloud";
+	backend: "nextcloud" | "opencloud";
 	targetKey: string;
 	observedLocalContentHash?: string;
 	remote: {

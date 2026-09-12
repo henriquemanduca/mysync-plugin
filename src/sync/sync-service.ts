@@ -6,6 +6,10 @@ import {
 	type NextcloudDownload,
 	type NextcloudRemoteFile
 } from "./nextcloud-service";
+import {
+	OpenCloudService,
+	type OpenCloudConnection
+} from "./opencloud-service";
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
@@ -16,6 +20,7 @@ import type {
 import type { PouchDbConflictStore } from "./conflict-store";
 import type {
 	ConflictResolutionStrategy,
+	CouchDbSyncConflict,
 	NextcloudSyncConflict,
 	NextcloudSyncState,
 	NextcloudSyncStateEntry,
@@ -108,6 +113,7 @@ export type CompletedSyncOperation =
 	| "resetLocalDatabases";
 
 export interface NextcloudDeletionConfirmation {
+	backendName: "Nextcloud" | "OpenCloud";
 	target: string;
 	count: number;
 	percentage: number;
@@ -142,6 +148,10 @@ function isExcludedObsidianConfigurationFilePath(
 		&& !isSyncedObsidianConfigurationFilePath(app, path, syncEnabled);
 }
 
+function isWebDavConflict(conflict: SyncConflict): conflict is NextcloudSyncConflict {
+	return conflict.backend === "nextcloud" || conflict.backend === "opencloud";
+}
+
 export class SyncService {
 	private syncInProgress = false;
 	private pendingSyncPaths = new Set<string>();
@@ -149,6 +159,7 @@ export class SyncService {
 	private applyingRemoteChange = false;
 	private conflictedPaths = new Set<string>();
 	private nextcloudService = new NextcloudService();
+	private opencloudService = new OpenCloudService();
 
 	constructor(
 		private app: App,
@@ -185,6 +196,12 @@ export class SyncService {
 		);
 	}
 
+	private getWebDavService(connection: NextcloudConnection): NextcloudService {
+		return connection.backend === "opencloud"
+			? this.opencloudService
+			: this.nextcloudService;
+	}
+
 	async initialize() {
 		await this.conflictStore.ensureDatabaseExists();
 		await this.cleanupExcludedObsidianConfigurationRecords();
@@ -210,7 +227,7 @@ export class SyncService {
 			new Notice("Conflict is no longer available.");
 			return;
 		}
-		if (initialConflict.backend === "nextcloud") {
+		if (isWebDavConflict(initialConflict)) {
 			return this.resolveNextcloudConflict(initialConflict, strategy);
 		}
 		const validationMessage = validateCouchDbSettings(settings, "resolving conflicts");
@@ -226,7 +243,7 @@ export class SyncService {
 		try {
 			const conflict = await this.conflictStore.getConflict(conflictId);
 
-			if (!conflict || conflict.status === "resolved" || conflict.backend === "nextcloud") {
+			if (!conflict || conflict.status === "resolved" || isWebDavConflict(conflict)) {
 				throw new Error("Conflict is no longer available.");
 			}
 
@@ -309,7 +326,7 @@ export class SyncService {
 		if (this.isRunning()) return;
 
 		const conflict = await this.conflictStore.getConflict(conflictId);
-		if (conflict?.backend === "nextcloud") {
+		if (conflict && isWebDavConflict(conflict)) {
 			if (!conflict.resolution || conflict.status !== "pending-push") {
 				new Notice("This conflict has no resolution waiting to be pushed.");
 				return;
@@ -357,7 +374,7 @@ export class SyncService {
 	}
 
 	private async applyConflictResolution(
-		conflict: Exclude<SyncConflict, { backend: "nextcloud" }>,
+		conflict: CouchDbSyncConflict,
 		strategy: ConflictResolutionStrategy,
 		selectedRevision?: string
 	) {
@@ -444,21 +461,26 @@ export class SyncService {
 		strategy: ConflictResolutionStrategy
 	) {
 		const settings = this.getSettings();
-		const validationMessage = validateNextcloudSettings(settings, "resolving conflicts");
+		const backendName = formatWebDavBackendName(conflict.backend);
+		if (settings.remoteBackend !== conflict.backend) {
+			new Notice(`Select ${backendName} as the remote backend before resolving this conflict.`);
+			return;
+		}
+		const validationMessage = validateWebDavSettings(settings, "resolving conflicts");
 		if (validationMessage) {
 			new Notice(validationMessage);
 			return;
 		}
 		this.syncInProgress = true;
 		try {
-			const connection = createNextcloudConnection(settings);
-			const targetKey = createNextcloudTargetKey(
+			const connection = createWebDavConnection(settings);
+			const targetKey = createWebDavTargetKey(
 				connection,
 				this.getCurrentSyncFolder(),
 				this.isObsidianConfigSyncEnabled()
 			);
 			if (targetKey !== conflict.targetKey) {
-				throw new Error("The active Nextcloud target differs from this conflict. Restore the original settings and pull again.");
+				throw new Error(`The active ${backendName} target differs from this conflict. Restore the original settings and pull again.`);
 			}
 			await this.conflictStore.updateConflict(conflict._id, (current) => ({
 				...current,
@@ -497,7 +519,7 @@ export class SyncService {
 					strategy,
 					resolvedDocumentIds: [conflict.recordId],
 					resolvedAt,
-					...(current.backend === "nextcloud" && current.resolution?.strategy === strategy && current.resolution.copyPath
+					...(isWebDavConflict(current) && current.resolution?.strategy === strategy && current.resolution.copyPath
 						? { copyPath: current.resolution.copyPath }
 						: {})
 				},
@@ -513,20 +535,20 @@ export class SyncService {
 			await this.refreshActiveConflicts();
 			new Notice(`Resolved conflict for ${conflict.path}.`);
 		} catch (error) {
-			logger.error("Nextcloud conflict resolution failed", error, { conflictId: conflict._id, strategy });
+			logger.error(`${backendName} conflict resolution failed`, error, { conflictId: conflict._id, strategy });
 			try {
 				await this.conflictStore.updateConflict(conflict._id, (current) => ({
 					...current,
 					status: current.status === "stale"
 						? "stale"
-						: current.backend === "nextcloud" && current.pendingOperation ? "pending-push" : "error",
-					error: getErrorMessage(error, "Nextcloud conflict resolution failed.")
+						: isWebDavConflict(current) && current.pendingOperation ? "pending-push" : "error",
+					error: getErrorMessage(error, `${backendName} conflict resolution failed.`)
 				}));
 			} catch (updateError) {
-				logger.error("Failed to persist Nextcloud conflict error", updateError);
+				logger.error(`Failed to persist ${backendName} conflict error`, updateError);
 			}
 			await this.refreshActiveConflicts();
-			new Notice(getErrorMessage(error, "Nextcloud conflict resolution failed."));
+			new Notice(getErrorMessage(error, `${backendName} conflict resolution failed.`));
 		} finally {
 			this.syncInProgress = false;
 			this.scheduleQueuedSync();
@@ -546,13 +568,14 @@ export class SyncService {
 			initializedAt: new Date().toISOString(),
 			entries: {}
 		};
+		const service = this.getWebDavService(connection);
 		this.applyingRemoteChange = true;
 		try {
 			if (strategy === "keep-local" || (strategy === "delete" && !local)) {
 				if (!local) {
 					if (remote) {
 						await this.setNextcloudPendingOperation(conflict._id, { action: "delete", path: conflict.path, ifMatch: remote.etag });
-						await this.nextcloudService.deleteFile(connection, conflict.path, { ifMatch: remote.etag });
+						await service.deleteFile(connection, conflict.path, { ifMatch: remote.etag });
 					}
 					delete state.entries[conflict.path];
 					await this.localStore.deleteFileRecordByPath(conflict.path);
@@ -566,7 +589,7 @@ export class SyncService {
 					...(remote ? { ifMatch: remote.etag } : { ifNoneMatch: "*" as const }),
 					expectedContentHash: local.contentHash
 				});
-				const metadata = await this.nextcloudService.uploadFile(
+				const metadata = await service.uploadFile(
 					connection,
 					conflict.path,
 					upload.content,
@@ -587,7 +610,7 @@ export class SyncService {
 					await this.localStore.saveNextcloudSyncState(state);
 					return;
 				}
-				const download = await this.nextcloudService.downloadFile(connection, conflict.path, remote.etag);
+				const download = await service.downloadFile(connection, conflict.path, remote.etag);
 				const record = await this.recordFromNextcloudDownload(download);
 				await this.writeRecordToVault(record, conflict.path);
 				await this.localStore.saveFileRecordIfChanged(record);
@@ -602,14 +625,14 @@ export class SyncService {
 				: undefined;
 			let copyRecord = copyPath ? await this.createLocalRecord(copyPath) : null;
 			if (!copyPath || !copyRecord) {
-				const download = await this.nextcloudService.downloadFile(connection, conflict.path, remote.etag);
+				const download = await service.downloadFile(connection, conflict.path, remote.etag);
 				const remoteRecord = await this.recordFromNextcloudDownload(download);
 				copyPath = await this.createConflictCopyPath(conflict.path);
 				copyRecord = { ...remoteRecord, _id: createFileRecordId(copyPath), path: copyPath, fileName: copyPath.slice(copyPath.lastIndexOf("/") + 1) };
 				await this.writeRecordToVault(copyRecord, copyPath);
 				await this.localStore.saveFileRecordIfChanged(copyRecord);
 				const persistedCopyPath = copyPath;
-				await this.conflictStore.updateConflict(conflict._id, (current) => current.backend === "nextcloud" && current.resolution
+				await this.conflictStore.updateConflict(conflict._id, (current) => isWebDavConflict(current) && current.resolution
 					? { ...current, resolution: { ...current.resolution, copyPath: persistedCopyPath } }
 					: current);
 			}
@@ -622,14 +645,14 @@ export class SyncService {
 			} else {
 				const copyUpload = await getNextcloudUpload(copyRecord);
 				await this.setNextcloudPendingOperation(conflict._id, { action: "upload", path: copyPath, ifNoneMatch: "*", expectedContentHash: copyRecord.contentHash });
-				copyMetadata = await this.nextcloudService.uploadFile(connection, copyPath, copyUpload.content, copyUpload.contentType, { ifNoneMatch: "*" });
+				copyMetadata = await service.uploadFile(connection, copyPath, copyUpload.content, copyUpload.contentType, { ifNoneMatch: "*" });
 			}
 			state.entries[copyPath] = toNextcloudStateEntry(copyMetadata, copyRecord.contentHash);
 			await this.localStore.saveNextcloudSyncState(state);
 
 			const localUpload = await getNextcloudUpload(local);
 			await this.setNextcloudPendingOperation(conflict._id, { action: "upload", path: conflict.path, ifMatch: remote.etag, expectedContentHash: local.contentHash });
-			const localMetadata = await this.nextcloudService.uploadFile(connection, conflict.path, localUpload.content, localUpload.contentType, { ifMatch: remote.etag });
+			const localMetadata = await service.uploadFile(connection, conflict.path, localUpload.content, localUpload.contentType, { ifMatch: remote.etag });
 			state.entries[conflict.path] = toNextcloudStateEntry(localMetadata, local.contentHash);
 			await this.localStore.saveNextcloudSyncState(state);
 		} finally {
@@ -641,14 +664,14 @@ export class SyncService {
 		conflictId: string,
 		operation: NonNullable<NextcloudSyncConflict["pendingOperation"]>
 	) {
-		await this.conflictStore.updateConflict(conflictId, (current) => current.backend === "nextcloud"
+		await this.conflictStore.updateConflict(conflictId, (current) => isWebDavConflict(current)
 			? { ...current, pendingOperation: operation }
 			: current);
 	}
 
 	private async getNextcloudMetadataIfExists(connection: NextcloudConnection, path: string) {
 		try {
-			return await this.nextcloudService.getFileMetadata(connection, path);
+			return await this.getWebDavService(connection).getFileMetadata(connection, path);
 		} catch (error) {
 			if (error instanceof NextcloudHttpError && error.status === 404) return undefined;
 			throw error;
@@ -667,7 +690,7 @@ export class SyncService {
 			return true;
 		}
 		if (pending.action === "upload" && remote && pending.expectedContentHash) {
-			const download = await this.nextcloudService.downloadFile(connection, pending.path, remote.etag);
+			const download = await this.getWebDavService(connection).downloadFile(connection, pending.path, remote.etag);
 			const record = await this.recordFromNextcloudDownload(download);
 			if (record.contentHash === pending.expectedContentHash) {
 				await this.finishAlreadyAppliedNextcloudOperation(conflict, remote, record.contentHash);
@@ -896,7 +919,7 @@ export class SyncService {
 	async pushToRemote() {
 		const settings = this.getSettings();
 
-		if (settings.remoteBackend === "nextcloud") {
+		if (isWebDavBackend(settings.remoteBackend)) {
 			return this.pushToNextcloud(false);
 		}
 
@@ -906,7 +929,7 @@ export class SyncService {
 	async pushPendingFilesToRemote() {
 		const settings = this.getSettings();
 
-		if (settings.remoteBackend === "nextcloud") {
+		if (isWebDavBackend(settings.remoteBackend)) {
 			return this.pushToNextcloud(true);
 		}
 
@@ -914,7 +937,7 @@ export class SyncService {
 	}
 
 	async pullFromRemote() {
-		return this.getSettings().remoteBackend === "nextcloud"
+		return isWebDavBackend(this.getSettings().remoteBackend)
 			? this.pullFromNextcloud()
 			: this.pullFromCouchDb();
 	}
@@ -922,7 +945,8 @@ export class SyncService {
 	async pullFromNextcloud() {
 		if (this.isRunning()) return;
 		const settings = this.getSettings();
-		const validationMessage = validateNextcloudSettings(settings, "pulling");
+		const backendName = formatWebDavBackendName(settings.remoteBackend);
+		const validationMessage = validateWebDavSettings(settings, "pulling");
 		if (validationMessage) {
 			this.onStatusChange({ state: "error", message: validationMessage });
 			new Notice(validationMessage);
@@ -930,18 +954,19 @@ export class SyncService {
 		}
 
 		this.syncInProgress = true;
-		const notice = new Notice("Nextcloud: Indexing local files...", 0);
+		const notice = new Notice(`${backendName}: Indexing local files...`, 0);
 		try {
-			const { localRecordsByPath } = await this.refreshLocalIndexBeforeNextcloudPull(notice);
-			notice.setMessage?.("Nextcloud: Listing remote files...");
-			const connection = createNextcloudConnection(settings);
-			const targetKey = createNextcloudTargetKey(
+			const { localRecordsByPath } = await this.refreshLocalIndexBeforeNextcloudPull(notice, backendName);
+			notice.setMessage?.(`${backendName}: Listing remote files...`);
+			const connection = createWebDavConnection(settings);
+			const service = this.getWebDavService(connection);
+			const targetKey = createWebDavTargetKey(
 				connection,
 				this.getCurrentSyncFolder(),
 				this.isObsidianConfigSyncEnabled()
 			);
 			const previous = await this.localStore.getNextcloudSyncState(targetKey);
-			const remoteInventory = await this.nextcloudService.listFiles(connection);
+			const remoteInventory = await service.listFiles(connection);
 			const relevantRemote = remoteInventory.filter((file) => this.isSupportedNextcloudPath(file.path));
 			const skippedUnsupported = remoteInventory.length - relevantRemote.length;
 			const remoteByPath = new Map(relevantRemote.map((file) => [file.path, file]));
@@ -1008,13 +1033,14 @@ export class SyncService {
 			const deletionPercentage = previousCount === 0 ? 0 : deletions.length / previousCount;
 			if (deletions.length >= 10 && deletionPercentage >= 0.25) {
 				const confirmed = await this.confirmNextcloudDeletions({
+					backendName,
 					target: formatNextcloudTarget(connection),
 					count: deletions.length,
 					percentage: deletionPercentage * 100
 				});
 				if (!confirmed) {
 					this.onStatusChange({ state: "idle" });
-					new Notice("Nextcloud pull cancelled; no changes were applied.");
+					new Notice(`${backendName} pull cancelled; no changes were applied.`);
 					return;
 				}
 			}
@@ -1052,7 +1078,7 @@ export class SyncService {
 					const { path, remote, before, local, localPathCollision } = task;
 					const localHash = local?.contentHash;
 
-					const download = await this.nextcloudService.downloadFile(connection, path, remote.etag);
+					const download = await service.downloadFile(connection, path, remote.etag);
 					docsRead += 1;
 
 					const record = await this.recordFromNextcloudDownload(download);
@@ -1112,7 +1138,7 @@ export class SyncService {
 					}
 
 					processedCount += 1;
-					notice.setMessage?.(`Nextcloud: Restoring (${processedCount}/${pendingDownloads.length})...`);
+					notice.setMessage?.(`${backendName}: Restoring (${processedCount}/${pendingDownloads.length})...`);
 					this.onStatusChange({
 						state: "restoring",
 						current: processedCount,
@@ -1150,7 +1176,7 @@ export class SyncService {
 				let deleteIndex = 0;
 				for (const path of deletions) {
 					deleteIndex += 1;
-					notice.setMessage?.(`Nextcloud: Deleting (${deleteIndex}/${deletions.length})...`);
+					notice.setMessage?.(`${backendName}: Deleting (${deleteIndex}/${deletions.length})...`);
 					this.onStatusChange({
 						state: "deleting",
 						current: deleteIndex,
@@ -1175,11 +1201,11 @@ export class SyncService {
 			await this.refreshActiveConflicts();
 			this.onStatusChange({ state: "pulled", docsRead, restored, deleted, skipped, conflicts: conflicts.length });
 			await this.onOperationCompleted("remotePull");
-			new Notice(`Nextcloud: downloaded ${restored}, deleted ${deleted}, skipped ${skipped}, conflicts ${conflicts.length}.`);
+			new Notice(`${backendName}: downloaded ${restored}, deleted ${deleted}, skipped ${skipped}, conflicts ${conflicts.length}.`);
 		} catch (error) {
-			logger.error("Nextcloud pull failed", error);
-			this.onStatusChange({ state: "error", message: "Nextcloud pull failed" });
-			new Notice(getErrorMessage(error, "Nextcloud pull failed. Check the console for details."));
+			logger.error(`${backendName} pull failed`, error);
+			this.onStatusChange({ state: "error", message: `${backendName} pull failed` });
+			new Notice(getErrorMessage(error, `${backendName} pull failed. Check the console for details.`));
 		} finally {
 			notice.hide();
 			this.syncInProgress = false;
@@ -1188,16 +1214,17 @@ export class SyncService {
 	}
 
 	private async pushToNextcloud(pendingChangesOnly: boolean) {
+		const settings = this.getSettings();
+		const backendName = formatWebDavBackendName(settings.remoteBackend);
 		if (this.isRunning()) {
-			logger.info("Nextcloud push skipped because another sync operation is running");
+			logger.info(`${backendName} push skipped because another sync operation is running`);
 			return;
 		}
 
-		const settings = this.getSettings();
-		const validationMessage = validateNextcloudSettings(settings);
+		const validationMessage = validateWebDavSettings(settings);
 
 		if (validationMessage) {
-			logger.warn("Nextcloud push validation failed", undefined, {
+			logger.warn(`${backendName} push validation failed`, undefined, {
 				message: validationMessage
 			});
 			this.onStatusChange({
@@ -1212,14 +1239,15 @@ export class SyncService {
 		let failed = false;
 		const notice = new Notice(
 			pendingChangesOnly
-				? "Pushing pending changes to Nextcloud."
-				: "Start pushing to Nextcloud.",
+				? `Pushing pending changes to ${backendName}.`
+				: `Start pushing to ${backendName}.`,
 			0
 		);
 
 		try {
-			const connection = createNextcloudConnection(settings);
-			const targetKey = createNextcloudTargetKey(
+			const connection = createWebDavConnection(settings);
+			const service = this.getWebDavService(connection);
+			const targetKey = createWebDavTargetKey(
 				connection,
 				this.getCurrentSyncFolder(),
 				this.isObsidianConfigSyncEnabled()
@@ -1230,9 +1258,9 @@ export class SyncService {
 				failed = true;
 				this.onStatusChange({
 					state: "error",
-					message: "Full Nextcloud push required"
+					message: `Full ${backendName} push required`
 				});
-				new Notice("Run a full Nextcloud push before pushing pending changes.");
+				new Notice(`Run a full ${backendName} push before pushing pending changes.`);
 				return;
 			}
 
@@ -1269,7 +1297,7 @@ export class SyncService {
 				scopedChanges.flatMap((change) => change.deleted ? [change.path] : [])
 			));
 
-			logger.info("Nextcloud push started", {
+			logger.info(`${backendName} push started`, {
 				recordCount: records.length,
 				deletedCount: deletedPaths.length,
 				pendingChangesOnly,
@@ -1277,10 +1305,10 @@ export class SyncService {
 			});
 
 			const supportsSnapshots = typeof (this.localStore as Partial<PouchDbFileStore>).getNextcloudSyncState === "function"
-				&& typeof (this.nextcloudService as Partial<NextcloudService>).uploadFile === "function";
+				&& typeof (service as Partial<NextcloudService>).uploadFile === "function";
 			const result = supportsSnapshots
 				? await this.pushNextcloudWithSnapshot(connection, targetKey, records, deletedPaths)
-				: await this.nextcloudService.pushChanges(
+				: await service.pushChanges(
 					connection,
 					{ records, deletedPaths },
 					(progress) => {
@@ -1292,7 +1320,7 @@ export class SyncService {
 					}
 				);
 
-			logger.info("Nextcloud push completed", {
+			logger.info(`${backendName} push completed`, {
 				uploaded: result.uploaded,
 				deleted: result.deleted,
 				skipped: result.skipped,
@@ -1304,10 +1332,10 @@ export class SyncService {
 				failed = true;
 				this.onStatusChange({
 					state: "error",
-					message: "Nextcloud push completed with errors"
+					message: `${backendName} push completed with errors`
 				});
 				new Notice(
-					`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}, errors ${result.errors}. Changes will be retried.`
+					`${backendName}: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}, errors ${result.errors}. Changes will be retried.`
 				);
 				return;
 			}
@@ -1324,19 +1352,19 @@ export class SyncService {
 
 			await this.onOperationCompleted("remotePush");
 			new Notice(
-				`Nextcloud: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}${"conflicts" in result ? `, conflicts ${result.conflicts}` : ""}.`
+				`${backendName}: uploaded ${result.uploaded}, deleted ${result.deleted}, skipped ${result.skipped}${"conflicts" in result ? `, conflicts ${result.conflicts}` : ""}.`
 			);
 		} catch (error) {
 			failed = true;
 			notice.hide();
-			logger.error("Nextcloud push failed", error);
+			logger.error(`${backendName} push failed`, error);
 			this.onStatusChange({
 				state: "error",
-				message: "Nextcloud push failed"
+				message: `${backendName} push failed`
 			});
 			new Notice(getErrorMessage(
 				error,
-				"Nextcloud push failed. Check the console for details."
+				`${backendName} push failed. Check the console for details.`
 			));
 		} finally {
 			notice.hide();
@@ -1380,8 +1408,8 @@ export class SyncService {
 		return repaired;
 	}
 
-	private async refreshLocalIndexBeforeNextcloudPull(notice?: Notice) {
-		notice?.setMessage?.("Nextcloud: Indexing local files...");
+	private async refreshLocalIndexBeforeNextcloudPull(notice?: Notice, backendName = "Nextcloud") {
+		notice?.setMessage?.(`${backendName}: Indexing local files...`);
 		const result = await this.syncLocalFiles();
 		const indexedRecords = await this.localStore.listFileRecords({ attachments: false });
 		const localRecordsByPath = new Map<string, VaultFileRecord>();
@@ -1411,6 +1439,8 @@ export class SyncService {
 		records: VaultFileRecord[],
 		deletedPaths: string[]
 	) {
+		const service = this.getWebDavService(connection);
+		const backendName = formatWebDavBackendName(connection.backend ?? "nextcloud");
 		let state = await this.localStore.getNextcloudSyncState(targetKey);
 		if (!state) {
 			state = {
@@ -1444,7 +1474,7 @@ export class SyncService {
 				}
 				try {
 					const upload = await getNextcloudUpload(record);
-					const metadata = await this.nextcloudService.uploadFile(
+					const metadata = await service.uploadFile(
 						connection,
 						record.path,
 						upload.content,
@@ -1472,7 +1502,7 @@ export class SyncService {
 							conflicts += 1;
 						}
 					} else {
-						logger.error("Nextcloud upload failed", error, { path: record.path });
+						logger.error(`${backendName} upload failed`, error, { path: record.path });
 						errors += 1;
 					}
 				}
@@ -1488,7 +1518,7 @@ export class SyncService {
 					continue;
 				}
 				try {
-					await this.nextcloudService.deleteFile(connection, path, before ? { ifMatch: before.etag } : {});
+					await service.deleteFile(connection, path, before ? { ifMatch: before.etag } : {});
 					delete state.entries[path];
 					deleted += 1;
 				} catch (error) {
@@ -1504,7 +1534,7 @@ export class SyncService {
 							conflicts += 1;
 						}
 					} else {
-						logger.error("Nextcloud deletion failed", error, { path });
+						logger.error(`${backendName} deletion failed`, error, { path });
 						errors += 1;
 					}
 				}
@@ -1530,7 +1560,7 @@ export class SyncService {
 	): Promise<NextcloudRemoteFile | null> {
 		const metadata = await this.getNextcloudMetadataIfExists(connection, path);
 		if (!metadata) return null;
-		const download = await this.nextcloudService.downloadFile(connection, path, metadata.etag);
+		const download = await this.getWebDavService(connection).downloadFile(connection, path, metadata.etag);
 		const record = await this.recordFromNextcloudDownload(download);
 		return record.contentHash === expectedHash ? metadata : null;
 	}
@@ -2191,7 +2221,7 @@ export class SyncService {
 
 		const settings = this.getSettings();
 
-		if (settings.remoteBackend === "nextcloud") {
+		if (isWebDavBackend(settings.remoteBackend)) {
 			return this.testNextcloudConnection(settings);
 		}
 
@@ -2199,7 +2229,8 @@ export class SyncService {
 	}
 
 	private async testNextcloudConnection(settings: MySyncSettings) {
-		const validationMessage = validateNextcloudSettings(settings, "testing");
+		const backendName = formatWebDavBackendName(settings.remoteBackend);
+		const validationMessage = validateWebDavSettings(settings, "testing");
 
 		if (validationMessage) {
 			this.onStatusChange({
@@ -2216,22 +2247,22 @@ export class SyncService {
 		try {
 			this.onStatusChange({ state: "testing" });
 
-			const connection = createNextcloudConnection(settings);
-			await this.nextcloudService.testConnection(connection);
+			const connection = createWebDavConnection(settings);
+			await this.getWebDavService(connection).testConnection(connection);
 
 			this.onStatusChange({
 				state: "tested",
-				databaseName: "Nextcloud",
+				databaseName: backendName,
 			});
-			new Notice("Connected to Nextcloud successfully");
+			new Notice(`Connected to ${backendName} successfully`);
 		} catch (error) {
 			failed = true;
-			logger.error("Nextcloud connection test failed", error);
+			logger.error(`${backendName} connection test failed`, error);
 			this.onStatusChange({
 				state: "error",
-				message: "Nextcloud connection failed"
+				message: `${backendName} connection failed`
 			});
-			new Notice(getErrorMessage(error, "Nextcloud connection failed. Check the console for details"));
+			new Notice(getErrorMessage(error, `${backendName} connection failed. Check the console for details`));
 		} finally {
 			this.syncInProgress = false;
 
@@ -2924,9 +2955,10 @@ export class SyncService {
 		kind: SyncConflictKind
 	): NextcloudSyncConflict {
 		const now = new Date().toISOString();
+		const backend = this.getSettings().remoteBackend === "opencloud" ? "opencloud" : "nextcloud";
 		return {
-			_id: `mysync-nextcloud-conflict:${targetKey}:${createFileRecordId(path)}`,
-			backend: "nextcloud",
+			_id: `mysync-${backend}-conflict:${targetKey}:${createFileRecordId(path)}`,
+			backend,
 			targetKey,
 			recordId: createFileRecordId(path),
 			path,
@@ -3115,25 +3147,63 @@ function arraysEqual(left: string[], right: string[]) {
 }
 
 
-function validateNextcloudSettings(settings: MySyncSettings, operation = "pushing") {
+function validateWebDavSettings(settings: MySyncSettings, operation = "pushing") {
+	if (settings.remoteBackend === "opencloud") {
+		if (!settings.opencloudUrl) {
+			return `Set an OpenCloud URL before ${operation}.`;
+		}
+		if (!isHttpUrl(settings.opencloudUrl)) {
+			return `Set a valid OpenCloud URL before ${operation}.`;
+		}
+		if (!settings.opencloudSpaceId) {
+			return `Set an OpenCloud Space ID before ${operation}.`;
+		}
+		if (!settings.opencloudToken) {
+			return `Set an OpenCloud token before ${operation}.`;
+		}
+		if (settings.opencloudAuthType === "app-token" && !settings.opencloudUsername) {
+			return `Set an OpenCloud username or UUID before ${operation}.`;
+		}
+		if (
+			!Number.isInteger(settings.opencloudTusChunkSizeMb)
+			|| settings.opencloudTusChunkSizeMb < 1
+			|| settings.opencloudTusChunkSizeMb > 10
+		) {
+			return `Set an OpenCloud TUS chunk size between 1 and 10 MB before ${operation}.`;
+		}
+		return null;
+	}
+
 	if (!settings.nextcloudUrl) {
 		return `Set a Nextcloud URL before ${operation}.`;
 	}
-
 	if (!isHttpUrl(settings.nextcloudUrl)) {
 		return `Set a valid Nextcloud URL before ${operation}.`;
 	}
-
 	if (!settings.nextcloudUsername || !settings.nextcloudPassword) {
 		return `Set Nextcloud credentials before ${operation}.`;
 	}
-
 	return null;
 }
 
+function createWebDavConnection(settings: MySyncSettings): NextcloudConnection {
+	if (settings.remoteBackend === "opencloud") {
+		const connection: OpenCloudConnection = {
+			backend: "opencloud",
+			url: settings.opencloudUrl,
+			spaceId: settings.opencloudSpaceId,
+			authType: settings.opencloudAuthType,
+			username: settings.opencloudUsername,
+			password: settings.opencloudToken,
+			token: settings.opencloudToken,
+			remotePath: settings.opencloudRemotePath,
+			tusChunkSizeBytes: settings.opencloudTusChunkSizeMb * 1_000_000
+		};
+		return connection;
+	}
 
-function createNextcloudConnection(settings: MySyncSettings): NextcloudConnection {
 	return {
+		backend: "nextcloud",
 		url: settings.nextcloudUrl,
 		username: settings.nextcloudUsername,
 		password: settings.nextcloudPassword,
@@ -3141,12 +3211,18 @@ function createNextcloudConnection(settings: MySyncSettings): NextcloudConnectio
 	};
 }
 
-function createNextcloudTargetKey(
+function createWebDavTargetKey(
 	connection: NextcloudConnection,
 	syncFolder: string,
 	syncObsidianConfig: boolean
 ) {
 	return JSON.stringify({
+		...(connection.backend === "opencloud"
+			? {
+				backend: "opencloud",
+				spaceId: (connection as OpenCloudConnection).spaceId
+			}
+			: {}),
 		url: connection.url.replace(/\/+$/g, ""),
 		username: connection.username,
 		remotePath: connection.remotePath.replace(/^\/+|\/+$/g, ""),
@@ -3171,7 +3247,18 @@ function toNextcloudStateEntry(
 
 function formatNextcloudTarget(connection: NextcloudConnection) {
 	const path = connection.remotePath.replace(/^\/+|\/+$/g, "");
+	if (connection.backend === "opencloud") {
+		return `${connection.url.replace(/\/+$/g, "")}/remote.php/dav/spaces/${encodeURIComponent((connection as OpenCloudConnection).spaceId)}/${path}`;
+	}
 	return `${connection.url.replace(/\/+$/g, "")}/${path}`;
+}
+
+function isWebDavBackend(backend: MySyncSettings["remoteBackend"]): backend is "nextcloud" | "opencloud" {
+	return backend === "nextcloud" || backend === "opencloud";
+}
+
+function formatWebDavBackendName(backend: MySyncSettings["remoteBackend"] | "nextcloud" | "opencloud") {
+	return backend === "opencloud" ? "OpenCloud" : "Nextcloud";
 }
 
 async function getNextcloudUpload(record: VaultFileRecord) {

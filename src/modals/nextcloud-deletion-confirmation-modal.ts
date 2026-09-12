@@ -16,7 +16,7 @@ export class NextcloudDeletionConfirmationModal extends Modal {
 	onOpen() {
 		this.titleEl.setText("Confirm remote deletions");
 		this.contentEl.createEl("p", {
-			text: `${this.details.count} local files (${this.details.percentage.toFixed(1)}%) are absent from the previous Nextcloud snapshot.`
+			text: `${this.details.count} local files (${this.details.percentage.toFixed(1)}%) are absent from the previous ${this.details.backendName} snapshot.`
 		});
 		this.contentEl.createEl("p", { text: `Remote target: ${this.details.target}` });
 		this.contentEl.createEl("p", {
