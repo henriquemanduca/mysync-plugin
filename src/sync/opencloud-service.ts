@@ -8,6 +8,7 @@ import {
 } from "./nextcloud-service";
 import { validateNextcloudFilePath } from "./nextcloud-path";
 import { normalizeOpenCloudSpaceId } from "./opencloud-path";
+import { areEtagsEqual, formatConditionalEtag } from "./etag";
 import { Logger } from "../utils/logger";
 
 const logger = new Logger("OpenCloudService");
@@ -120,13 +121,30 @@ export class OpenCloudService extends NextcloudService {
 		expectedEtag: string
 	) {
 		const before = await this.getFileMetadata(conn, path);
-		if (before.etag !== expectedEtag) {
-			throw new NextcloudHttpError("OpenCloud download precondition failed: HTTP 412", 412);
+		if (!areEtagsEqual(before.etag, expectedEtag)) {
+			logger.warn("OpenCloud download precondition failed before GET", {
+				path,
+				expectedEtag,
+				serverEtag: before.etag
+			});
+			throw new NextcloudHttpError(
+				`OpenCloud download precondition failed: HTTP 412 (before GET mismatch for ${path}: expected ${expectedEtag}, server has ${before.etag})`,
+				412
+			);
 		}
 		const download = await super.downloadFile(conn, path, expectedEtag);
 		const after = await this.getFileMetadata(conn, path);
-		if (download.etag !== expectedEtag || after.etag !== expectedEtag) {
-			throw new NextcloudHttpError("OpenCloud download precondition failed: HTTP 412", 412);
+		if (!areEtagsEqual(download.etag, expectedEtag) || !areEtagsEqual(after.etag, expectedEtag)) {
+			logger.warn("OpenCloud download precondition failed after GET", {
+				path,
+				expectedEtag,
+				downloadEtag: download.etag,
+				serverEtag: after.etag
+			});
+			throw new NextcloudHttpError(
+				`OpenCloud download precondition failed: HTTP 412 (after GET mismatch for ${path}: expected ${expectedEtag}, download has ${download.etag}, server has ${after.etag})`,
+				412
+			);
 		}
 		return download;
 	}
@@ -139,7 +157,7 @@ export class OpenCloudService extends NextcloudService {
 		if (precondition.ifMatch) {
 			try {
 				const metadata = await this.getFileMetadata(conn, remotePath);
-				if (metadata.etag !== precondition.ifMatch) {
+				if (!areEtagsEqual(metadata.etag, precondition.ifMatch)) {
 					throw new NextcloudHttpError("OpenCloud deletion precondition failed: HTTP 412", 412);
 				}
 			} catch (error) {
@@ -301,8 +319,8 @@ function assertValidPath(path: string, allowEmpty: boolean) {
 
 function buildConditionalHeaders(condition: NextcloudWritePrecondition) {
 	return {
-		...(condition.ifMatch ? { "If-Match": condition.ifMatch } : {}),
-		...(condition.ifNoneMatch ? { "If-None-Match": condition.ifNoneMatch } : {})
+		...(condition.ifMatch ? { "If-Match": formatConditionalEtag(condition.ifMatch) } : {}),
+		...(condition.ifNoneMatch ? { "If-None-Match": formatConditionalEtag(condition.ifNoneMatch) } : {})
 	};
 }
 

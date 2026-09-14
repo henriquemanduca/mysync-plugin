@@ -3,6 +3,7 @@ import { XMLParser } from "fast-xml-parser";
 import type { VaultFileRecord } from "./types";
 import { isTextFileRecord } from "./vault-files";
 import { validateNextcloudFilePath } from "./nextcloud-path";
+import { formatConditionalEtag } from "./etag";
 import { Logger } from "../utils/logger";
 
 const logger = new Logger("NextcloudService");
@@ -224,7 +225,7 @@ export class NextcloudService {
 			method: "GET",
 			headers: {
 				...this.buildAuthHeaders(conn),
-				"If-Match": expectedEtag
+				"If-Match": formatConditionalEtag(expectedEtag)
 			}
 		}, "Nextcloud download");
 		const etag = getResponseHeader(result.headers, "etag")
@@ -836,8 +837,8 @@ function decodeUrlSegments(pathname: string) {
 
 function buildConditionalHeaders(condition: NextcloudWritePrecondition) {
 	return {
-		...(condition.ifMatch ? { "If-Match": condition.ifMatch } : {}),
-		...(condition.ifNoneMatch ? { "If-None-Match": condition.ifNoneMatch } : {})
+		...(condition.ifMatch ? { "If-Match": formatConditionalEtag(condition.ifMatch) } : {}),
+		...(condition.ifNoneMatch ? { "If-None-Match": formatConditionalEtag(condition.ifNoneMatch) } : {})
 	};
 }
 

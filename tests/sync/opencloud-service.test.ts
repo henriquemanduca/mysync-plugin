@@ -164,4 +164,63 @@ describe("OpenCloudService", () => {
 
 		expect(requestUrlMock.mock.calls.some(([options]) => options.method === "DELETE")).toBe(false);
 	});
+
+	it("downloads file when GET returns a weak ETag matching the expected metadata ETag", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "PROPFIND") {
+				return response(207, metadataXml("&quot;etag-123&quot;"));
+			}
+			if (options.method === "GET") {
+				return response(200, "hello", { etag: 'W/"etag-123"' }, new ArrayBuffer(5));
+			}
+			throw new Error(`Unexpected ${options.method} request`);
+		});
+
+		const result = await new OpenCloudService().downloadFile(
+			bearerConnection,
+			"Folder/note.md",
+			'"etag-123"'
+		);
+
+		expect(result).toMatchObject({
+			path: "Folder/note.md",
+			size: 5
+		});
+	});
+
+	it("downloads file when metadata has unquoted ETag while GET returns quoted ETag", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "PROPFIND") {
+				return response(207, metadataXml("etag-123"));
+			}
+			if (options.method === "GET") {
+				return response(200, "hello", { etag: '"etag-123"' }, new ArrayBuffer(5));
+			}
+			throw new Error(`Unexpected ${options.method} request`);
+		});
+
+		const result = await new OpenCloudService().downloadFile(
+			bearerConnection,
+			"Folder/note.md",
+			"etag-123"
+		);
+
+		expect(result).toMatchObject({
+			path: "Folder/note.md",
+			size: 5
+		});
+	});
+
+	it("rejects download with 412 when ETag differs between listing and server", async () => {
+		requestUrlMock.mockResolvedValueOnce(response(207, metadataXml("&quot;different-etag&quot;")));
+
+		await expect(new OpenCloudService().downloadFile(
+			bearerConnection,
+			"Folder/note.md",
+			'"expected-etag"'
+		)).rejects.toMatchObject({
+			status: 412
+		});
+	});
 });
+

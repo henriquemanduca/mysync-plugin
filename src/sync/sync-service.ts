@@ -10,6 +10,7 @@ import {
 	OpenCloudService,
 	type OpenCloudConnection
 } from "./opencloud-service";
+import { areEtagsEqual } from "./etag";
 import type { MySyncSettings } from "../settings";
 import type {
 	CouchDbConnection,
@@ -495,7 +496,7 @@ export class SyncService {
 				: !local && !(await this.localPathExists(conflict.path));
 			const remote = await this.getNextcloudMetadataIfExists(connection, conflict.path);
 			const remoteMatches = conflict.remote.exists
-				? remote?.etag === conflict.remote.etag
+				? areEtagsEqual(remote?.etag, conflict.remote.etag)
 				: !remote;
 
 			if (!localMatches || !remoteMatches) {
@@ -1020,7 +1021,7 @@ export class SyncService {
 					continue;
 				}
 
-				const remoteChanged = remote.etag !== before.etag;
+				const remoteChanged = !areEtagsEqual(remote.etag, before.etag);
 				if (!remoteChanged) {
 					skipped += 1;
 					continue;
