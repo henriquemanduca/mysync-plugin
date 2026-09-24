@@ -266,6 +266,27 @@ describe("NextcloudService push changes", () => {
 			.toHaveLength(1);
 	});
 
+	it("removes empty parent directories up to the configured stop path", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "PROPFIND") {
+				return response(207, multistatus(new URL(options.url).pathname));
+			}
+			return response(204);
+		});
+		const service = new NextcloudService();
+
+		await service.removeEmptyParentDirectories(connection, "Sync/Topic/Sub/note.md", "Sync");
+
+		const deletedUrls = requestUrlMock.mock.calls
+			.filter(([options]) => options.method === "DELETE")
+			.map(([options]) => options.url);
+
+		expect(deletedUrls).toEqual([
+			"https://cloud.example.com/remote.php/webdav/Notes/Sync/Topic/Sub",
+			"https://cloud.example.com/remote.php/webdav/Notes/Sync/Topic"
+		]);
+	});
+
 	it("keeps the deletion pending when deleting the file fails", async () => {
 		requestUrlMock.mockImplementation(async (options) => {
 			if (options.method === "DELETE") {

@@ -222,5 +222,25 @@ describe("OpenCloudService", () => {
 			status: 412
 		});
 	});
+
+	it("removes empty parent directories through the Space endpoint", async () => {
+		requestUrlMock.mockImplementation(async (options) => {
+			if (options.method === "PROPFIND") {
+				return response(207, `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"><d:response><d:href>${new URL(options.url).pathname}</d:href></d:response></d:multistatus>`);
+			}
+			return response(204);
+		});
+
+		await new OpenCloudService().removeEmptyParentDirectories(bearerConnection, "Folder/Sub/note.md");
+
+		const deletedCalls = requestUrlMock.mock.calls.filter(([options]) => options.method === "DELETE");
+		expect(deletedCalls.map(([options]) => options.url)).toEqual([
+			"https://cloud.example.com/remote.php/dav/spaces/storage-users-1%24personal-id/Notes/Folder/Sub",
+			"https://cloud.example.com/remote.php/dav/spaces/storage-users-1%24personal-id/Notes/Folder"
+		]);
+		expect(deletedCalls[0]?.[0].headers).toEqual(expect.objectContaining({
+			Authorization: "Bearer bearer-token"
+		}));
+	});
 });
 

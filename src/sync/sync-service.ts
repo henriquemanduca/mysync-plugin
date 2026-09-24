@@ -1518,16 +1518,19 @@ export class SyncService {
 					this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });
 					continue;
 				}
+				let fileDeleted = false;
 				try {
 					await service.deleteFile(connection, path, before ? { ifMatch: before.etag } : {});
 					delete state.entries[path];
 					deleted += 1;
+					fileDeleted = true;
 				} catch (error) {
 					if (isPreconditionFailure(error)) {
 						const remote = await this.getNextcloudMetadataIfExists(connection, path);
 						if (!remote) {
 							delete state.entries[path];
 							deleted += 1;
+							fileDeleted = true;
 						} else {
 							await this.conflictStore.upsertConflict(this.createNextcloudConflict(
 								targetKey, path, null, remote, undefined, "local-delete-remote-edit"
@@ -1537,6 +1540,16 @@ export class SyncService {
 					} else {
 						logger.error(`${backendName} deletion failed`, error, { path });
 						errors += 1;
+					}
+				}
+				if (fileDeleted && !isObsidianConfigFilePath(this.app, path)) {
+					try {
+						if (typeof service.removeEmptyParentDirectories === "function") {
+							const syncFolder = this.getCurrentSyncFolder();
+							await service.removeEmptyParentDirectories(connection, path, syncFolder);
+						}
+					} catch (cleanupError) {
+						logger.warn(`Failed to clean empty ${backendName} directories`, cleanupError, { path });
 					}
 				}
 				this.onStatusChange({ state: "pushing", docsWritten: current, totalDocs: total });

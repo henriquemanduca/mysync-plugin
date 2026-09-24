@@ -1105,6 +1105,140 @@ describe("SyncService Nextcloud push", () => {
 		}));
 	});
 
+	it("cleans empty remote parent directories after deleting files during push with snapshots", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		fixture.settings.syncFolderMode = "custom";
+		fixture.settings.customSyncFolder = "Sync";
+		fixture.store.listFileRecords.mockResolvedValue([]);
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(1);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:Sync/Topic/deleted.md",
+				path: "Sync/Topic/deleted.md",
+				deleted: true
+			}],
+			lastSequence: 2
+		});
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: {
+				"Sync/Topic/deleted.md": {
+					path: "Sync/Topic/deleted.md",
+					etag: "\"old\"",
+					syncedContentHash: "hash"
+				}
+			}
+		});
+		const deleteFile = vi.fn().mockResolvedValue("deleted");
+		const removeEmptyParentDirectories = vi.fn().mockResolvedValue(undefined);
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			uploadFile: vi.fn(),
+			deleteFile,
+			removeEmptyParentDirectories
+		};
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(deleteFile).toHaveBeenCalledWith(expect.any(Object), "Sync/Topic/deleted.md", { ifMatch: "\"old\"" });
+		expect(removeEmptyParentDirectories).toHaveBeenCalledWith(
+			expect.any(Object),
+			"Sync/Topic/deleted.md",
+			"Sync"
+		);
+	});
+
+	it("does not clean empty remote directories when deleting an Obsidian configuration file", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		fixture.settings.syncObsidianConfig = true;
+		fixture.store.listFileRecords.mockResolvedValue([]);
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(1);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:.obsidian/app.json",
+				path: ".obsidian/app.json",
+				deleted: true
+			}],
+			lastSequence: 2
+		});
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: {
+				".obsidian/app.json": {
+					path: ".obsidian/app.json",
+					etag: "\"old\"",
+					syncedContentHash: "hash"
+				}
+			}
+		});
+		const deleteFile = vi.fn().mockResolvedValue("deleted");
+		const removeEmptyParentDirectories = vi.fn().mockResolvedValue(undefined);
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			uploadFile: vi.fn(),
+			deleteFile,
+			removeEmptyParentDirectories
+		};
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(deleteFile).toHaveBeenCalledWith(expect.any(Object), ".obsidian/app.json", { ifMatch: "\"old\"" });
+		expect(removeEmptyParentDirectories).not.toHaveBeenCalled();
+	});
+
+	it("completes push even when remote empty directory cleanup throws an error", async () => {
+		const fixture = createFixture();
+		fixture.settings.remoteBackend = "nextcloud";
+		fixture.settings.nextcloudUrl = "https://cloud.example.com";
+		fixture.settings.nextcloudUsername = "alice";
+		fixture.settings.nextcloudPassword = "app-password";
+		fixture.store.listFileRecords.mockResolvedValue([]);
+		fixture.store.getNextcloudPushCheckpoint.mockResolvedValue(1);
+		fixture.store.listFileChangesSince.mockResolvedValue({
+			changes: [{
+				recordId: "vault-file:Topic/deleted.md",
+				path: "Topic/deleted.md",
+				deleted: true
+			}],
+			lastSequence: 2
+		});
+		fixture.store.getNextcloudSyncState.mockResolvedValue({
+			type: "mysync-nextcloud-sync-state",
+			targetKey: "target",
+			initializedAt: "2026-09-01T00:00:00.000Z",
+			entries: {
+				"Topic/deleted.md": {
+					path: "Topic/deleted.md",
+					etag: "\"old\"",
+					syncedContentHash: "hash"
+				}
+			}
+		});
+		const deleteFile = vi.fn().mockResolvedValue("deleted");
+		const removeEmptyParentDirectories = vi.fn().mockRejectedValue(new Error("Directory locked"));
+		(fixture.service as unknown as { nextcloudService: unknown }).nextcloudService = {
+			uploadFile: vi.fn(),
+			deleteFile,
+			removeEmptyParentDirectories
+		};
+
+		await fixture.service.pushPendingFilesToRemote();
+
+		expect(deleteFile).toHaveBeenCalledWith(expect.any(Object), "Topic/deleted.md", { ifMatch: "\"old\"" });
+		expect(removeEmptyParentDirectories).toHaveBeenCalledWith(expect.any(Object), "Topic/deleted.md", "/");
+		expect(fixture.store.saveNextcloudPushCheckpoint).toHaveBeenCalledWith(expect.any(String), 2);
+	});
+
 	it("pushes pending changes quickly when snapshot state is missing", async () => {
 		const fixture = createFixture();
 		fixture.settings.remoteBackend = "nextcloud";

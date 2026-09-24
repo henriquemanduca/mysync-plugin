@@ -35,6 +35,7 @@ export interface NextcloudPushPlan {
 	records: VaultFileRecord[];
 	deletedPaths: string[];
 	preconditions?: Record<string, NextcloudWritePrecondition>;
+	stopAtPath?: string;
 }
 
 export interface NextcloudWritePrecondition {
@@ -499,9 +500,10 @@ export class NextcloudService {
 			}
 
 			try {
-				await this.removeEmptyParentDirectories(conn, path);
+				await this.removeEmptyParentDirectories(conn, path, plan.stopAtPath);
 			} catch (error) {
-				logger.warn("Failed to clean empty Nextcloud directories", error, { path });
+				const backendLabel = conn.backend === "opencloud" ? "OpenCloud" : "Nextcloud";
+				logger.warn(`Failed to clean empty ${backendLabel} directories`, error, { path });
 			}
 
 			onProgress({
@@ -516,13 +518,15 @@ export class NextcloudService {
 		return { uploaded, deleted, skipped, errors };
 	}
 
-	private async removeEmptyParentDirectories(
+	async removeEmptyParentDirectories(
 		conn: NextcloudConnection,
-		filePath: string
-	) {
+		filePath: string,
+		stopAtPath = ""
+	): Promise<void> {
+		const normalizedStop = stopAtPath.replace(/^\/+|\/+$/g, "");
 		let parentPath = getParentPath(filePath);
 
-		while (parentPath) {
+		while (parentPath && parentPath !== normalizedStop) {
 			const directoryState = await this.getDirectoryState(conn, parentPath);
 
 			if (directoryState === "missing") {
@@ -539,10 +543,11 @@ export class NextcloudService {
 			}
 
 			const deleteStatus = await this.deletePath(conn, parentPath);
+			const backendLabel = conn.backend === "opencloud" ? "OpenCloud" : "Nextcloud";
 			logger.debug(
 				deleteStatus === "deleted"
-					? "Deleted empty directory from Nextcloud"
-					: "Empty directory already absent from Nextcloud",
+					? `Deleted empty directory from ${backendLabel}`
+					: `Empty directory already absent from ${backendLabel}`,
 				{ path: parentPath }
 			);
 			parentPath = getParentPath(parentPath);
@@ -574,7 +579,8 @@ export class NextcloudService {
 		}
 
 		if (result.status < 200 || result.status >= 300) {
-			throw new Error(`Nextcloud directory listing failed: HTTP ${result.status}`);
+			const backendLabel = conn.backend === "opencloud" ? "OpenCloud" : "Nextcloud";
+			throw new Error(`${backendLabel} directory listing failed: HTTP ${result.status}`);
 		}
 
 		const requestedPath = normalizeUrlPath(url);
