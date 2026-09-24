@@ -847,7 +847,7 @@ export class MySyncSettingTab extends PluginSettingTab {
 							if (!isOpenCloudAuthType(value)) return;
 							this.plugin.settings.opencloudAuthType = value;
 							await this.plugin.saveSettings();
-							this.display();
+							this.renderLegacySettings();
 						})
 				);
 

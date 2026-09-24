@@ -303,8 +303,14 @@ function asOpenCloudConnection(conn: NextcloudConnection): OpenCloudConnection {
 }
 
 function assertValidSpaceId(spaceId: string) {
-	if (!spaceId || /[\/\\\u0000-\u001f\u007f]/u.test(spaceId)) {
+	if (!spaceId) {
 		throw new Error("Invalid OpenCloud Space ID.");
+	}
+	for (let i = 0; i < spaceId.length; i++) {
+		const code = spaceId.charCodeAt(i);
+		if (code <= 31 || code === 127 || code === 47 || code === 92) {
+			throw new Error("Invalid OpenCloud Space ID.");
+		}
 	}
 }
 
@@ -379,5 +385,5 @@ function getHttpStatus(error: unknown): number | null {
 }
 
 function wait(delayMs: number) {
-	return new Promise<void>((resolve) => globalThis.setTimeout(resolve, delayMs));
+	return new Promise<void>((resolve) => window.setTimeout(resolve, delayMs));
 }
