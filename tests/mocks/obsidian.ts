@@ -47,6 +47,10 @@ export class TFolder extends TAbstractFile {
 			child.parent = this;
 		}
 	}
+
+	isRoot(): boolean {
+		return this.path === "/" || this.path === "";
+	}
 }
 
 export class Notice {

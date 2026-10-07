@@ -1,0 +1,169 @@
+import PouchDB from "pouchdb/dist/pouchdb";
+import type { SyncConflict, SyncConflictStatus } from "../core/types/conflict.types";
+import type { IConflictStore } from "../core/contracts/conflict-store.interface";
+import { isPouchNotFound } from "../utils/pouchdb-errors";
+import { Logger } from "../utils/logger";
+
+const logger = new Logger("PouchDbConflictStore");
+const ACTIVE_CONFLICT_STATUSES = new Set<SyncConflictStatus>([
+	"pending",
+	"resolving",
+	"pending-push",
+	"stale",
+	"error"
+]);
+
+export class PouchDbConflictStore implements IConflictStore {
+	private conflictDb: PouchDB<SyncConflict>;
+	private conflictDbClosed = false;
+	private operationQueue = Promise.resolve();
+
+	constructor(private localDatabaseName: string) {
+		this.conflictDb = new PouchDB<SyncConflict>(localDatabaseName);
+	}
+
+	async ensureDatabaseExists(): Promise<void> {
+		await this.runWithLocalDb("ensureDatabaseExists", async (conflictDb) => {
+			await conflictDb.info();
+		});
+	}
+
+	async listConflicts(): Promise<SyncConflict[]> {
+		return this.runWithLocalDb("listConflicts", async (conflictDb) => {
+			const result = await conflictDb.allDocs({ include_docs: true });
+			return result.rows
+				.flatMap((row) => row.doc ? [row.doc] : [])
+				.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+		});
+	}
+
+	async listActiveConflicts(): Promise<SyncConflict[]> {
+		return (await this.listConflicts()).filter((conflict) => ACTIVE_CONFLICT_STATUSES.has(conflict.status));
+	}
+
+	async getConflict(conflictId: string): Promise<SyncConflict | null> {
+		return this.runWithLocalDb("getConflict", async (conflictDb) => {
+			try {
+				return await conflictDb.get(conflictId);
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					return null;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async upsertConflict(conflict: SyncConflict): Promise<void> {
+		return this.runWithLocalDb("upsertConflict", async (conflictDb) => {
+			try {
+				const existing = await conflictDb.get(conflict._id);
+				await conflictDb.put({
+					...conflict,
+					detectedAt: existing.status === "resolved" ? conflict.detectedAt : existing.detectedAt,
+					_rev: existing._rev
+				});
+			} catch (error) {
+				if (isPouchNotFound(error)) {
+					await conflictDb.put(conflict);
+					return;
+				}
+
+				throw error;
+			}
+		});
+	}
+
+	async updateConflict(
+		conflictId: string,
+		update: (conflict: SyncConflict) => SyncConflict
+	): Promise<void> {
+		return this.runWithLocalDb("updateConflict", async (conflictDb) => {
+			const existing = await conflictDb.get(conflictId);
+			await conflictDb.put({
+				...update(existing),
+				_id: existing._id,
+				_rev: existing._rev,
+				updatedAt: new Date().toISOString()
+			});
+		});
+	}
+
+	async reset(): Promise<void> {
+		const resetOperation = this.operationQueue.then(async () => {
+			this.ensureLocalDbOpen();
+			logger.warn("Resetting local conflict database", undefined, {
+				database: this.localDatabaseName
+			});
+
+			try {
+				await this.conflictDb.destroy();
+			} finally {
+				this.conflictDbClosed = true;
+				this.ensureLocalDbOpen();
+			}
+
+			await this.conflictDb.info();
+			logger.info("Local conflict database reset completed", {
+				database: this.localDatabaseName
+			});
+		});
+
+		this.operationQueue = resetOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		await resetOperation;
+	}
+
+	async close(): Promise<void> {
+		const closeOperation = this.operationQueue.then(async () => {
+			if (!this.conflictDbClosed) {
+				await this.conflictDb.close();
+				this.conflictDbClosed = true;
+			}
+		});
+
+		this.operationQueue = closeOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		await closeOperation;
+	}
+
+	private runWithLocalDb<T>(
+		operationName: string,
+		operation: (conflictDb: PouchDB<SyncConflict>) => Promise<T>
+	): Promise<T> {
+		const queuedOperation = this.operationQueue.then(async () => {
+			this.ensureLocalDbOpen();
+
+			try {
+				return await operation(this.conflictDb);
+			} catch (error) {
+				logger.error(`Conflict store operation ${operationName} failed`, error);
+				throw error;
+			}
+		});
+
+		this.operationQueue = queuedOperation.then(
+			() => undefined,
+			() => undefined
+		);
+
+		return queuedOperation;
+	}
+
+	private ensureLocalDbOpen(): void {
+		if (!this.conflictDbClosed) {
+			return;
+		}
+
+		this.conflictDb = new PouchDB<SyncConflict>(this.localDatabaseName);
+		this.conflictDbClosed = false;
+	}
+}
+
