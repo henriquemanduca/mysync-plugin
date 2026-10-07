@@ -1,5 +1,5 @@
 import { Modal, Setting } from "obsidian";
-import type { ConflictResolutionStrategy, SyncConflict } from "../../core/types/conflict.types";
+import type { ConflictResolutionStrategy, SyncConflict } from "../../core";
 
 interface ConflictAction {
 	label: string;

@@ -1,7 +1,7 @@
 import { Setting } from "obsidian";
 import type { App } from "obsidian";
 import type MySyncPlugin from "../../../main";
-import { isSyncFolderMode } from "../../../core/types/settings.types";
+import { isSyncFolderMode } from "../../../core";
 import { formatDateTime } from "../../../utils/date-format";
 
 export function renderLocalConfigSection(

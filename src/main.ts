@@ -1,16 +1,14 @@
 import { Notice, Plugin } from "obsidian";
-import type { CompletedSyncOperation, MySyncSettings, SyncConflict, SyncStatus } from "./core";
+import type { CompletedSyncOperation, MySyncSettings, SyncConflict } from "./core";
 import { MySyncSettingTab } from "./ui/settings/settings-tab";
-import {
-	SettingsRepository,
-	createConflictDatabaseName,
-	createLocalDatabaseName
-} from "./ui/settings/settings-repository";
+import { createLocalDatabaseName, SettingsRepository } from "./ui/settings/settings-repository";
 import { StatusBarController } from "./ui/status-bar/status-bar-controller";
-import { ConflictResolutionModal } from "./ui/modals/conflict-resolution-modal";
-import { EmptyFolderCleanupModal } from "./ui/modals/empty-folder-cleanup-modal";
-import { LocalDatabaseResetModal } from "./ui/modals/local-database-reset-modal";
-import { NextcloudDeletionConfirmationModal } from "./ui/modals/nextcloud-deletion-confirmation-modal";
+import {
+	ConflictResolutionModal,
+	EmptyFolderCleanupModal,
+	LocalDatabaseResetModal,
+	NextcloudDeletionConfirmationModal
+} from "./ui/modals";
 import { PouchDbFileStore } from "./sync/pouchdb-store";
 import { PouchDbConflictStore } from "./sync/conflict-store";
 import { SyncService } from "./sync/sync-service";

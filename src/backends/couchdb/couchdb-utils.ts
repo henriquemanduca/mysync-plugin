@@ -1,4 +1,4 @@
-import type { MySyncSettings } from "../../core/types/settings.types";
+import type { MySyncSettings } from "../../core";
 import type { CouchDbConnection } from "../../sync/pouchdb-store";
 
 export function validateCouchDbSettings(settings: MySyncSettings, operation = "pushing"): string | null {

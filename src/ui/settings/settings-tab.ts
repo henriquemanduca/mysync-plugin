@@ -6,8 +6,8 @@ import {
 	isOpenCloudAuthType,
 	isRemoteSyncBackend,
 	isSyncFolderMode
-} from "../../core/types/settings.types";
-import { normalizeOpenCloudSpaceId } from "../../sync/opencloud-path";
+} from "../../core";
+import { normalizeOpenCloudSpaceId } from "../../backends";
 import { renderLocalConfigSection } from "./sections/local-config-section";
 import { renderLocalDataSection } from "./sections/local-data-section";
 import { renderCouchDbSection } from "./sections/couchdb-section";

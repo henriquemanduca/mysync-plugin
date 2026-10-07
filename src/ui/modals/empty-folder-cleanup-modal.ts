@@ -1,5 +1,5 @@
 import { Modal, Setting } from "obsidian";
-import type { EmptyFolderCleanupResult } from "../../core/types/sync.types";
+import type { EmptyFolderCleanupResult } from "../../core";
 import { setDestructiveButton } from "../../utils/button";
 
 export class EmptyFolderCleanupModal extends Modal {

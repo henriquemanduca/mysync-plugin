@@ -1,5 +1,4 @@
-import type { MySyncSettings, SyncStatus } from "../../core";
-import { IDLE_STATUS_DELAY_MS } from "../../core/constants/default-settings";
+import { IDLE_STATUS_DELAY_MS, type MySyncSettings, type SyncStatus } from "../../core";
 import { formatDateTime } from "../../utils/date-format";
 
 interface SyncStatusView {

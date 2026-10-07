@@ -1,16 +1,14 @@
 import type { Plugin } from "obsidian";
 import {
+	ANDROID_NOMEDIA_PATH,
 	DEFAULT_SETTINGS,
-	STRING_SETTING_KEYS,
-	ANDROID_NOMEDIA_PATH
-} from "../../core/constants/default-settings";
-import {
-	type MySyncSettings,
 	isOpenCloudAuthType,
 	isRemoteSyncBackend,
-	isSyncFolderMode
-} from "../../core/types/settings.types";
-import { normalizeOpenCloudSpaceId } from "../../sync/opencloud-path";
+	isSyncFolderMode,
+	type MySyncSettings,
+	STRING_SETTING_KEYS
+} from "../../core";
+import { normalizeOpenCloudSpaceId } from "../../backends";
 import { isLoggerLevel, Logger } from "../../utils/logger";
 import { isAndroidApp } from "../../utils/platform";
 

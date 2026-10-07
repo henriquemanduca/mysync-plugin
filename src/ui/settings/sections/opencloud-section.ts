@@ -1,7 +1,7 @@
 import { Setting } from "obsidian";
 import type MySyncPlugin from "../../../main";
-import { isOpenCloudAuthType } from "../../../core/types/settings.types";
-import { normalizeOpenCloudSpaceId } from "../../../sync/opencloud-path";
+import { isOpenCloudAuthType } from "../../../core";
+import { normalizeOpenCloudSpaceId } from "../../../backends";
 
 export function renderOpenCloudSection(
 	containerEl: HTMLElement,

@@ -1,6 +1,5 @@
 import PouchDB from "pouchdb/dist/pouchdb";
-import type { SyncConflict, SyncConflictStatus } from "../core/types/conflict.types";
-import type { IConflictStore } from "../core/contracts/conflict-store.interface";
+import type { IConflictStore, SyncConflict, SyncConflictStatus } from "../core";
 import { isPouchNotFound } from "../utils/pouchdb-errors";
 import { Logger } from "../utils/logger";
 

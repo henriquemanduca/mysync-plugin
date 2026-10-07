@@ -1,23 +1,25 @@
 import { App, Notice, TAbstractFile, TFile, TFolder } from "obsidian";
 import {
-	NextcloudHttpError,
-	NextcloudService,
 	type NextcloudConnection,
 	type NextcloudDownload,
-	type NextcloudRemoteFile
+	NextcloudHttpError,
+	type NextcloudRemoteFile,
+	NextcloudService
 } from "./nextcloud-service";
-import {
-	OpenCloudService,
-	type OpenCloudConnection
-} from "./opencloud-service";
+import { type OpenCloudConnection, OpenCloudService } from "./opencloud-service";
 import { areEtagsEqual } from "./etag";
-import type { MySyncSettings } from "../settings";
 import type {
-	CouchDbConnection,
-	FileChange,
-	FileRevisionState,
-	PouchDbFileStore
-} from "./pouchdb-store";
+	CompletedSyncOperation,
+	EmptyFolderCleanupResult,
+	LocalSyncResult,
+	MySyncSettings,
+	NextcloudDeletionConfirmation,
+	PullClassification,
+	RemoteDeletionResult,
+	RestoreResult,
+	SyncStatus
+} from "../core";
+import type { CouchDbConnection, FileChange, FileRevisionState, PouchDbFileStore } from "./pouchdb-store";
 import type { PouchDbConflictStore } from "./conflict-store";
 import type {
 	ConflictResolutionStrategy,
@@ -38,88 +40,23 @@ import {
 	createFileRecordId,
 	createLocalFileContentHash,
 	createObsidianConfigFileRecord,
+	getAttachmentArrayBuffer,
 	getPathFromFileRecordId,
+	getRecordContentHash,
 	getSyncFolder,
 	getSyncFolderState,
 	isFileInsideSyncFolder,
-	isSyncBlacklistedPath,
 	isObsidianConfigFilePath,
-	isSyncableVaultFile,
-	isSupportedSyncFilePath,
 	isPathInsideSyncFolder,
-	listObsidianConfigFilePaths,
-	getAttachmentArrayBuffer,
-	getRecordContentHash,
-	isTextFileRecord
+	isSupportedSyncFilePath,
+	isSyncableVaultFile,
+	isSyncBlacklistedPath,
+	isTextFileRecord,
+	listObsidianConfigFilePaths
 } from "./vault-files";
 import { Logger } from "../utils/logger";
 import { EmptyFolderCleaner } from "./empty-folder-cleaner";
-import { validateCouchDbSettings, createCouchDbConnection, getPendingPushBlockingState } from "./couchdb-utils";
-
-interface LocalSyncResult {
-	total: number;
-	saved: number;
-	skipped: number;
-}
-
-interface RestoreResult {
-	total: number;
-	restored: number;
-	skipped: number;
-	conflicts: number;
-	configurationChanged: boolean;
-}
-
-interface RemoteDeletionResult {
-	total: number;
-	deleted: number;
-	skipped: number;
-	conflicts: number;
-	configurationChanged: boolean;
-}
-
-interface PullClassification {
-	deletedRecordIds: string[];
-	conflictedRecordIds: Set<string>;
-}
-
-export interface EmptyFolderCleanupResult {
-	total: number;
-	removed: number;
-	skipped: number;
-}
-
-export type SyncStatus =
-	| { state: "idle" }
-	| { state: "queued"; pending: number }
-	| { state: "syncing"; current: number; total: number; saved: number; skipped: number }
-	| { state: "done"; total: number; saved: number; skipped: number }
-	| { state: "pushing"; docsWritten: number; totalDocs?: number }
-	| { state: "pushed"; docsWritten: number }
-	| { state: "pulling"; docsRead: number }
-	| { state: "deleting"; current: number; total: number; deleted: number; skipped: number; conflicts: number }
-	| { state: "restoring"; current: number; total: number; restored: number; skipped: number; conflicts: number }
-	| { state: "pulled"; docsRead: number; restored: number; deleted: number; skipped: number; conflicts: number }
-	| { state: "cleaning-empty-folders"; current: number; total: number; removed: number; skipped: number }
-	| { state: "empty-folders-cleaned"; removed: number; skipped: number }
-	| { state: "resetting-local-databases" }
-	| { state: "local-databases-reset" }
-	| { state: "testing" }
-	| { state: "tested"; databaseName: string; documentCount?: number }
-	| { state: "error"; message: string };
-
-export type CompletedSyncOperation =
-	| "syncNow"
-	| "remotePush"
-	| "remotePull"
-	| "resetLocalDatabases";
-
-export interface NextcloudDeletionConfirmation {
-	backendName: "Nextcloud" | "OpenCloud";
-	target: string;
-	count: number;
-	percentage: number;
-}
+import { createCouchDbConnection, getPendingPushBlockingState, validateCouchDbSettings } from "../backends";
 
 const logger = new Logger("SyncService");
 const SYNCED_OBSIDIAN_CONFIGURATION_FILE_NAMES = new Set([

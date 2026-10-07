@@ -1,13 +1,12 @@
 import { requestUrl } from "obsidian";
 import {
-	NextcloudHttpError,
-	NextcloudService,
 	type NextcloudConnection,
+	NextcloudHttpError,
 	type NextcloudRemoteFile,
+	NextcloudService,
 	type NextcloudWritePrecondition
 } from "./nextcloud-service";
-import { validateNextcloudFilePath } from "./nextcloud-path";
-import { normalizeOpenCloudSpaceId } from "./opencloud-path";
+import { normalizeOpenCloudSpaceId, validateNextcloudFilePath } from "../backends";
 import { areEtagsEqual, formatConditionalEtag } from "./etag";
 import { Logger } from "../utils/logger";
 

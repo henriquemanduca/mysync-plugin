@@ -1,5 +1,5 @@
 import { type App, TFolder } from "obsidian";
-import type { EmptyFolderCleanupResult } from "../core/types/sync.types";
+import type { EmptyFolderCleanupResult } from "../core";
 import { Logger } from "../utils/logger";
 
 const logger = new Logger("EmptyFolderCleaner");
