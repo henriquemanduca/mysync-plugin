@@ -15,8 +15,8 @@ export function renderLocalDataSection(containerEl: HTMLElement, plugin: MySyncP
 		.setName("Reset local databases")
 		.setDesc("Delete the local file index, conflicts, revisions, baselines, and replication checkpoints. Vault files and remote data are not changed.")
 		.addButton((button) => {
-			button.setButtonText("Reset local databases").then(() => {});
+			button.setButtonText("Reset local databases");
 			setDestructiveButton(button)
-				.onClick(() => plugin.openLocalDatabaseResetModal()).then(() => {});
-		}).then(() => {});
+				.onClick(() => plugin.openLocalDatabaseResetModal());
+		});
 }

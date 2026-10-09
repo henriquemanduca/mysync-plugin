@@ -117,11 +117,11 @@ export function normalizeSavedSettings(data: unknown): Partial<MySyncSettings> {
 	}
 
 	if (typeof data["lastPushToCouchDbAt"] === "string" && !settings.lastRemotePushAt) {
-		settings.lastRemotePushAt = data["lastPushToCouchDbAt"] as string;
+		settings.lastRemotePushAt = data["lastPushToCouchDbAt"];
 	}
 
 	if (typeof data["lastPullFromCouchDbAt"] === "string" && !settings.lastRemotePullAt) {
-		settings.lastRemotePullAt = data["lastPullFromCouchDbAt"] as string;
+		settings.lastRemotePullAt = data["lastPullFromCouchDbAt"];
 	}
 
 	if (isSyncFolderMode(data.syncFolderMode)) {

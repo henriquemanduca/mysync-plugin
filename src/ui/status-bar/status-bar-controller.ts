@@ -61,17 +61,15 @@ export class StatusBarController {
 	}
 
 	private scheduleIdleStatus(): void {
-		const timerFn = typeof window !== "undefined" ? window.setTimeout : globalThis.setTimeout;
-		this.idleStatusTimer = timerFn(() => {
+		this.idleStatusTimer = window.setTimeout(() => {
 			this.idleStatusTimer = null;
 			this.updateSyncStatus({ state: "idle" });
-		}, IDLE_STATUS_DELAY_MS) as unknown as number;
+		}, IDLE_STATUS_DELAY_MS);
 	}
 
 	private clearIdleStatusTimer(): void {
 		if (this.idleStatusTimer !== null) {
-			const clearFn = typeof window !== "undefined" ? window.clearTimeout : globalThis.clearTimeout;
-			clearFn(this.idleStatusTimer);
+			window.clearTimeout(this.idleStatusTimer);
 			this.idleStatusTimer = null;
 		}
 	}
