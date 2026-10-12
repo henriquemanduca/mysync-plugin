@@ -5,8 +5,12 @@ import {
 	createLocalVaultId,
 	normalizeSavedSettings
 } from "../../src/ui/settings/settings-repository";
+import { DEFAULT_SETTINGS } from "../../src/core/constants/default-settings";
 
 describe("SettingsRepository helpers", () => {
+	it("defaults syncObsidianConfig to false for new installations", () => {
+		expect(DEFAULT_SETTINGS.syncObsidianConfig).toBe(false);
+	});
 	it("generates a vault ID string", () => {
 		const vaultId = createLocalVaultId();
 		expect(typeof vaultId).toBe("string");

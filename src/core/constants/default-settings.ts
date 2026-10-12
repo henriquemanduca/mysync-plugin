@@ -5,7 +5,7 @@ export const DEFAULT_SETTINGS: MySyncSettings = {
 	localConflictDatabase: "",
 	syncFolderMode: "vault-root",
 	customSyncFolder: "",
-	syncObsidianConfig: true,
+	syncObsidianConfig: false,
 	remoteBackend: "couchdb",
 	couchDbUrl: "",
 	couchDbDatabase: "mysync",
